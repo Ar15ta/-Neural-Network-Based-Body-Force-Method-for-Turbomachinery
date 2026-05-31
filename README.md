@@ -8,6 +8,8 @@
 
 本项目提出了一种**全新的彻体力计算流程**，首次将神经网络与自动微分技术引入叶轮机械彻体力建模领域，以 NASA ROTOR 37 离心压缩机为例进行验证。
 
+**推荐使用AI协助搭建环境，运行和理解本项目内容！！！**
+
 **核心思路**：
 1. 从 CFX 单通道定常计算提取子午面通量数据
 2. 使用神经网络拟合 λ×通量 场，获得连续可微的表达式
@@ -177,7 +179,7 @@ $$
 ---
 
 ## 7. 使用流程
-
+建议在虚拟机用Linux环境与主机共享文件夹操作，这样可以主机运行Python而虚拟机用openFOAM环境运行下面的工具。
 ### Step 1: 从 CFX 导出通量数据
 
 在 CFX 单通道定常计算完成后，导出以下数据：
@@ -188,10 +190,20 @@ $$
 
 保存为 CSV 格式，例如 `CFX_Output_Benneke_Flux.csv`
 
-### Step 2: 训练神经网络
-
+### Step 2: 编译 OpenFOAM 工具
+包括求解器和其他工具。具体地，见Make文件夹。
 ```bash
-cd Bodyforce_Method/NASA_ROTOR_37
+wmake
+```
+### Step 3: 数据准备\前处理
+```bash
+# 生成堵塞因子场和用于训练神经网络的.csv文件
+calculateBlockage
+```
+### Step 4: 训练神经网络
+
+```python
+# 运行ANN_Initial_Trainner.py，生成神经网络模型。
 python ANN_Initial_Trainner.py
 ```
 
@@ -200,27 +212,12 @@ python ANN_Initial_Trainner.py
 - `flux_mlp_weights.npz` — NPZ 权重（可选）
 - `weights_bin/` — 原始二进制权重（可选）
 - `normalization_params.csv` — 归一化参数
-
-### Step 3: 编译 OpenFOAM 工具
-包括求解器和其他工具。具体地，见Make文件夹。
-```bash
-wmake
-```
-
-### Step 4: 运行彻体力计算工具
-```bash
-# 生成堵塞因子场和用于训练神经网络的.csv文件
-calculateBlockage
-```
-```python
-# 运行ANN_Initial_Trainner.py，生成神经网络模型。
-python ANN_Initial_Trainner.py
-```
+### Step 5: 生成彻体力场
 ```bash
 # 使用 ANN 方法（推荐）
 ANN_Pre_Processing
 
-# 或使用传统 IDW 方法（对比参考）
+# 或使用传统 RBF+IDW方法（对比参考，需要补充超参数）
 Benneke_Pre_Processing
 ```
 
@@ -228,18 +225,13 @@ Benneke_Pre_Processing
 - `constant/bodyForce` — 彻体力向量场
 - `constant/lambda` — 堵塞因子标量场
 
-### Step 5: 全环非定常计算
-
-如果目录不对，记得将生成的 `bodyForce` 和 `lambda` 拷贝到constant目录下：
-
-然后使用 ArisaSTALL 求解器进行计算：
-
+### Step 6: 全环非定常计算
+记得将生成的 `bodyForce` 和 `lambda` 拷贝到constant目录下，然后使用 ArisaSTALL 求解器进行计算：
 ```bash
 foamRun
 ```
-
+该求解器借用constant文件夹下的fvModels调用彻体力场计算。
 ---
-
 ## 8. 依赖环境
 
 | 软件 | 版本要求 |
@@ -392,3 +384,5 @@ SOFTWARE.
 
 ## 14. 联系方式
 如有问题或建议，请通过705393357@qq.com反馈。
+
+## 15. 引用
