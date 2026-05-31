@@ -71,7 +71,6 @@ Arisa_Benneke_Method/
 │   ├── momentumPredictor.C           # 动量预测器
 │   ├── thermophysicalPredictor.C     # 能量预测器
 │   ├── correctPressure.C             # 压力修正
-│   ├── OnlineMLPTrainer.C            # 在线 MLP 训练器（可选）
 │   ├── Make/                         # 编译配置
 │   └── Solver_README.md                     # 求解器详细说明
 │
