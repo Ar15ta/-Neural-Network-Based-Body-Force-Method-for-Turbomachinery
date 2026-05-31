@@ -230,7 +230,8 @@ Benneke_Pre_Processing
 ```bash
 foamRun
 ```
-该求解器借用constant文件夹下的fvModels调用彻体力场计算。
+该求解器将用constant文件夹下的fvModels调用彻体力场计算。
+
 ---
 ## 8. 依赖环境
 
