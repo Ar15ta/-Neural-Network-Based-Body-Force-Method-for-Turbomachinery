@@ -72,7 +72,7 @@ Arisa_Benneke_Method/
 │   ├── thermophysicalPredictor.C     # 能量预测器
 │   ├── correctPressure.C             # 压力修正
 │   ├── Make/                         # 编译配置
-│   └── Solver_README.md                     # 求解器详细说明
+│   └── Solver_README.md              # 求解器详细说明
 │
 └── README.md                         # 本文件
 ```
