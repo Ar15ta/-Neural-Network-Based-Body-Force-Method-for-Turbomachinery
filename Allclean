@@ -1,0 +1,175 @@
+#!/bin/bash
+
+# OpenFOAM清理脚本 - 基于Allclean模式
+# 功能： 1. 检查当前目录是否在指定的OpenFOAM运行目录
+#       2. 如果不在，将当前文件夹复制到指定目录
+#       3. 保留：初始文件夹(0)、网格(.msh)、数据(.csv)、运行脚本、计算必要文件、Make文件夹及其C源文件
+#       4. 删除：计算结果、重构文件、postProcessing等
+
+# 定义目标OpenFOAM运行目录
+target_dir="/home/dyfluid/OpenFOAM/dyfluid-13/run"
+
+echo "开始清理本地OpenFOAM案例..."
+
+# 检查constant/polyMesh目录是否完整
+POLYMESH_DIR="constant/polyMesh"
+if [ -d "$POLYMESH_DIR" ]; then
+    echo "检查polyMesh文件完整性..."
+    
+    # 检查必要的polyMesh文件是否存在
+    REQUIRED_POLYMESH_FILES=('points' 'faces' 'owner' 'neighbour')
+    MISSING_FILES=()
+    
+    for file in "${REQUIRED_POLYMESH_FILES[@]}"; do
+        if [ ! -f "$POLYMESH_DIR/$file" ]; then
+            MISSING_FILES+=($file)
+        fi
+    done
+    
+    # 如果缺少文件，运行reconstructPar -constant修复
+    if [ ${#MISSING_FILES[@]} -gt 0 ]; then
+        echo "检测到缺少polyMesh文件：${MISSING_FILES[*]}"
+        echo "运行reconstructPar -constant修复..."
+        
+        if reconstructPar -constant > /dev/null 2>&1; then
+            echo "polyMesh文件修复成功！"
+            
+            # 再次检查修复后的文件
+            MISSING_FILES=()
+            for file in "${REQUIRED_POLYMESH_FILES[@]}"; do
+                if [ ! -f "$POLYMESH_DIR/$file" ]; then
+                    MISSING_FILES+=($file)
+                fi
+            done
+            
+            if [ ${#MISSING_FILES[@]} -gt 0 ]; then
+                echo "警告：修复后仍然缺少文件：${MISSING_FILES[*]}"
+                echo "案例可能存在严重问题，清理操作可能导致案例损坏！"
+                echo -n "是否继续清理？(y/N) "
+                read -r response
+                if [[ ! "$response" =~ ^[Yy]$ ]]; then
+                    echo "清理操作已取消"
+                    exit 1
+                fi
+            fi
+        else
+            echo "错误：reconstructPar -constant执行失败"
+            echo "案例可能存在严重问题，清理操作可能导致案例损坏！"
+            echo -n "是否继续清理？(y/N) "
+            read -r response
+            if [[ ! "$response" =~ ^[Yy]$ ]]; then
+                echo "清理操作已取消"
+                exit 1
+            fi
+        fi
+    else
+        echo "polyMesh文件完整"
+    fi
+fi
+
+# 检查当前目录是否在目标路径下
+current_dir=$(pwd)
+# if [[ "$current_dir" == "$target_dir"* ]]; then
+    # 已经在目标目录，直接清理
+    #echo "当前已在OpenFOAM运行目录，直接清理..."
+# else
+    # 不在目标目录，先清理本地，再复制
+    # echo "当前不在OpenFOAM运行目录，先清理本地文件夹，再执行复制..."
+# fi
+
+# 定义需要保留的重要文件模式
+IMPORTANT_FILES=('*.msh' '*.csv' 'For_*.sh' 'Allrun' 'Allclean' 'BodyForce.foam' '*.C')
+IMPORTANT_DIRS=("0" "constant" "system" "Make")
+
+# 1. 清理postProcessing文件夹（保留csv文件）、删除动态编译代码文件夹
+if [ -d "postProcessing" ]; then
+    echo "清理postProcessing文件夹（保留csv文件）..."
+    find postProcessing -type f ! -name '*.csv' -delete
+    # 删除空目录
+    find postProcessing -type d -empty -delete
+fi
+
+if [ -d "dynamicCode" ]; then
+    echo "删除动态编译代码文件夹..."
+    rm -rf dynamicCode
+fi
+# 2. 智能清理处理器文件夹
+for processor in processor*/; do
+    if [ -d "$processor" ]; then
+        echo "处理 $processor..."
+        
+        # 进入处理器文件夹
+        cd "$processor"
+        
+        # 统计文件夹中的项目数量
+        total_items=$(ls -1A | wc -l)
+        
+        # 检查是否只有0和constant文件夹
+        only_zero_and_constant=false
+        if [ "$total_items" -eq 2 ]; then
+            if [ -d "0" ] && [ -d "constant" ]; then
+                only_zero_and_constant=true
+            fi
+        elif [ "$total_items" -eq 1 ]; then
+            if [ -d "0" ] || [ -d "constant" ]; then
+                only_zero_and_constant=true
+            fi
+        fi
+        
+        # 如果只有0和constant文件夹，则删除整个processor文件夹
+        if [ "$only_zero_and_constant" = true ]; then
+            echo "  只包含0和constant文件夹，删除整个处理器文件夹"
+            cd ..
+            rm -rf "$processor"
+        else
+            # 否则只清理计算结果文件（保留0和constant）
+            echo "  清理计算结果文件（保留0和constant）"
+            for item in *; do
+                if [ -d "$item" ] && [ "$item" != "0" ] && [ "$item" != "constant" ]; then
+                    echo "    删除 $item"
+                    rm -rf "$item"
+                fi
+            done
+            cd ..
+        fi
+    fi
+done
+
+# 3. 删除可能的日志文件
+for log_file in log.*; do
+    if [ -f "$log_file" ]; then
+        echo "删除日志文件 $log_file"
+        rm -f "$log_file"
+    fi
+done
+
+# 3. 删除根目录下的重构时间步
+# 注意：在shell中，[0-9]*匹配所有以数字开头的文件/目录（包括两位数及以上的时间步）
+# 例如：0.001, 0.01, 0.1, 1, 10, 100等都能被匹配
+# 跳过 0.orig（初始备份目录）
+for time_dir in [0-9]*; do
+    # 确保是目录并且不是初始文件夹0，也不是0.orig
+    if [ -d "$time_dir" ] && [ "$time_dir" != "0" ] && [ "$time_dir" != "0.orig" ]; then
+        echo "删除重构时间步 $time_dir"
+        rm -rf "$time_dir"
+    fi
+done
+
+echo "清理完成！保留了${IMPORTANT_DIRS[*]}文件夹和${IMPORTANT_FILES[*]}文件。"
+
+# 检查是否需要复制到目标目录
+# if [[ "$current_dir" != "$target_dir"* ]]; then
+    # echo "准备将清理后的文件夹复制到OpenFOAM运行目录..."
+    
+    # 创建目标目录（如果不存在）
+    # mkdir -p "$target_dir"
+    
+    # 获取当前文件夹名称
+    # folder_name=$(basename "$current_dir")
+    
+    # 复制当前文件夹到目标目录
+    # cp -r "$current_dir" "$target_dir/"
+    
+    # echo "文件夹已成功复制到：$target_dir/$folder_name"
+    # echo "复制完成！"
+# fi
