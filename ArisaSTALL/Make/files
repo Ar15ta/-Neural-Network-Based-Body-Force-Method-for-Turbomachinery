@@ -1,0 +1,6 @@
+ArisaSTALL.C
+momentumPredictor.C
+thermophysicalPredictor.C
+correctPressure.C
+
+LIB = $(FOAM_USER_LIBBIN)/libArisaSTALL
