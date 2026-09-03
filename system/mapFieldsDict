@@ -1,0 +1,41 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      mapFieldsDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+interpolationMethod cellVolumeWeight;
+
+// Map data from source patch to target coincident patch
+// Only map normal patches with faces, nonConformalCyclic patches don't need mapping
+patchMap
+(
+    OUTLET          OUTLET
+    OUT_SHROUD      OUT_SHROUD
+    OUT_HUB         OUT_HUB
+    OUT_TO_ROTOR    OUT_TO_ROTOR
+    INLET           INLET
+    IN_SHROUD       IN_SHROUD
+    IN_HUB          IN_HUB
+    IN_TO_ROTOR     IN_TO_ROTOR
+    ROTOR_HUB       ROTOR_HUB
+    ROTOR_SHROUD    ROTOR_SHROUD
+    ROTOR_TO_IN     ROTOR_TO_IN
+    ROTOR_TO_OUT    ROTOR_TO_OUT
+);
+
+// Target patches whose field values are mapped from the internal source mesh
+cuttingPatches
+(
+);
+
+// ************************************************************************* //

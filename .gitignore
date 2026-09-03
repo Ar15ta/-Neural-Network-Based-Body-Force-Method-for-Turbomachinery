@@ -1,0 +1,21 @@
+# OpenFOAM 运行/编译产物
+[0-9]*/
+!/0/
+!/0.orig/
+!Initializer/0/
+processor*/
+postProcessing/
+dynamicCode/
+platforms/
+*.obj
+*.o
+*.dep
+*.so
+log.*
+*.log
+foam.log
+core
+
+# 忽略时间步目录但保留初始场
+/[1-9]*
+/0.[0-9]*

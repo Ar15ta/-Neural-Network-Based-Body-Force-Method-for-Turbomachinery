@@ -1,0 +1,30 @@
+SEPARATE FIELD OPTIMIZATION RESULTS
+============================================================
+
+PRESSURE SIDE:
+----------------------------------------
+
+THETA FIELD:
+  Kernel: gaussian
+  Epsilon: 120
+  Neighbors: 60
+  Polynomial: True
+  Polynomial Degree: 1
+  NRMSE: 0.002372
+
+SUCTION SIDE:
+----------------------------------------
+
+THETA FIELD:
+  Kernel: gaussian
+  Epsilon: 120
+  Neighbors: 60
+  Polynomial: True
+  Polynomial Degree: 1
+  NRMSE: 0.002551
+
+============================================================
+PRESSURE SIDE TOTAL NRMSE: 0.002372
+SUCTION SIDE TOTAL NRMSE: 0.002551
+OVERALL TOTAL NRMSE: 0.004923
+Polynomial Configuration: Enabled (Degree 1)

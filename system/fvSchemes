@@ -1,0 +1,62 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSchemes;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+ddtSchemes
+{
+    default         Euler;
+    // default         steadyState;
+}
+
+gradSchemes
+{
+    default         Gauss linear;
+}
+
+divSchemes
+{
+    default             none;
+    div(phi,U)          Gauss limitedLinear 0.7;
+    div(phid,p)         Gauss limitedLinear 0.7;
+    div(phi,e)          Gauss limitedLinear 0.7;
+    div(phi,(p|rho))    Gauss limitedLinear 0.7;
+    div(phi,K)          Gauss limitedLinear 1;
+
+    div((interpolate(lambda)*phi),U) Gauss limitedLinear 0.7;
+    div((interpolate(lambda)*phi),K) Gauss limitedLinear 0.7;
+    div((interpolate(lambda)*phi),e) Gauss limitedLinear 0.7;
+    div((interpolate(lambda)*phi),(p|rho)) Gauss limitedLinear 0.7;
+
+    div(((rho*nuEff)*dev2(T(grad(U))))) Upwind;
+}
+
+laplacianSchemes
+{
+    default         Gauss linear corrected;
+}
+
+interpolationSchemes
+{
+    default         linear;
+}
+
+snGradSchemes
+{
+    default         corrected;
+}
+
+
+// ************************************************************************* //
+

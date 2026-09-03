@@ -1,0 +1,7 @@
+# 编译配置
+# SOURCE += calculateBlockage.C
+# EXE = $(FOAM_USER_APPBIN)/calculateBlockage
+# URCE += ANN_Pre_Processing.C
+# EXE = $(FOAM_USER_APPBIN)/ANN_Pre_Processing
+SOURCE += Sampler.C
+EXE = $(FOAM_USER_APPBIN)/Sampler

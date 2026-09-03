@@ -1,0 +1,34 @@
+EXE_INC = \
+    -std=c++17 \
+    -I$(FOAM_MODULES)/fluidSolver/lnInclude \
+    -I$(FOAM_MODULES)/isothermalFluid/lnInclude \
+    -I$(FOAM_MODULES)/fluid/lnInclude \
+    -I$(LIB_SRC)/physicalProperties/lnInclude \
+    -I$(LIB_SRC)/thermophysicalModels/basic/lnInclude \
+    -I$(LIB_SRC)/MomentumTransportModels/momentumTransportModels/lnInclude \
+    -I$(LIB_SRC)/MomentumTransportModels/compressible/lnInclude \
+    -I$(LIB_SRC)/ThermophysicalTransportModels/thermophysicalTransportModel/lnInclude \
+    -I$(LIB_SRC)/ThermophysicalTransportModels/fluid/lnInclude \
+    -I$(LIB_SRC)/ThermophysicalTransportModels/fluidThermo/lnInclude \
+    -I$(LIB_SRC)/finiteVolume/cfdTools \
+    -I$(LIB_SRC)/finiteVolume/lnInclude \
+    -I$(LIB_SRC)/meshTools/lnInclude \
+    -I/home/dyfluid/libtorch/include \
+    -I/home/dyfluid/libtorch/include/torch/csrc/api/include
+
+EXE_LDFLAGS = \
+    -Wl,-rpath,/home/dyfluid/libtorch/lib
+
+LIB_LIBS = \
+    -lfluidSolver \
+    -lisothermalFluid \
+    -lfluid \
+    -lfluidThermophysicalModels \
+    -lcompressibleMomentumTransportModels \
+    -lcoupledThermophysicalTransportModels \
+    -lfiniteVolume \
+    -lmeshTools \
+    -L/home/dyfluid/libtorch/lib \
+    -ltorch \
+    -ltorch_cpu \
+    -lc10
