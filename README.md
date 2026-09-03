@@ -2,6 +2,8 @@
 
 ## Neural Network-Based Body Force Method for Turbomachinery
 
+**中文** | [English](README_EN.md)
+
 ---
 <img width="2882" height="2603" alt="BFM_Procedure" src="https://github.com/user-attachments/assets/27d04fa3-2a7b-4362-a516-f9874742e8ee" />
 
