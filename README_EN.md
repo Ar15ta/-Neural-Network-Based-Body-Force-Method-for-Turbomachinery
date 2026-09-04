@@ -52,7 +52,7 @@ Arisa_Benneke_Method/
 │
 ├── Bodyforce_Method/                 # Body force generation module
 │   ├── NASA_ROTOR_37/                # NASA ROTOR 37 example case
-│   │   ├── ANN_Initial_Trainner.py   # Python neural network training script
+│   │   ├── ANN_TrainOneMLP.py       # Python neural network training script
 │   │   ├── ANN_Pre_Processing.C      # C++ neural network inference (LibTorch)
 │   │   ├── Benneke_Pre_Processing.C  # Traditional IDW interpolation (reference)
 │   │   ├── BodyForceVisualizer.py    # Body force visualization tool
@@ -61,9 +61,8 @@ Arisa_Benneke_Method/
 │   │   │   └── best_parameters_separate.txt
 │   │   │
 │   │   ├── ANN_Output/               # Training outputs
-│   │   │   ├── flux_mlp_traced.pt    # TorchScript model
-│   │   │   ├── flux_mlp_weights.npz  # NPZ weights
-│   │   │   ├── weights_bin/          # Raw binary weights
+│   │   │   ├── flux_mlp_traced.pt    # TorchScript model (loaded by ANN_Pre_Processing)
+│   │   │   ├── flux_mlp_best.pt      # Best checkpoint
 │   │   │   └── normalization_params.csv
 │   │   │
 │   │   ├── CFX_Output_Benneke_Flux.csv  # Flux data exported from CFX
@@ -197,7 +196,7 @@ $$
 ### Step 0: Prepare the mesh
 
 1. Build a **clean full-annulus passage mesh** (blades are not part of the geometry; they are represented by the body force + blockage factor).
-2. Import it into the case folder (`constant/polyMesh`). This repository provides `Rotor_37_Mesh.msh`, which can be converted with `gmshToFoam` / `fluentMeshToFoam`.
+2. Import it into the case folder (`constant/polyMesh`). **This repository already ships the converted `constant/polyMesh`**, so no mesh file is needed to run; for your own mesh, use `gmshToFoam` / `fluentMeshToFoam` to convert a `.msh`/`.cas` file into `constant/polyMesh`.
 3. **Make sure to glue the interfaces**: use `mergePairs` / `stitchMesh`, or glue the partitioned regions into a contiguous mesh during import, and use `createPatch` to set up the inlet, outlet, and wall boundaries.
 4. Define the `ROTOR_FLUID` cellZone — the body force acts only on this region.
 
@@ -256,13 +255,12 @@ calculateBlockage
 
 ```bash
 # Reads openFOAM_Input_Force.csv, outputs to ANN_Output/
-python ANN_Initial_Trainner.py
+python ANN_TrainOneMLP.py
 ```
 
 **Output files** (`ANN_Output/`):
 - `flux_mlp_traced.pt` — TorchScript model (loaded directly by C++ LibTorch).
-- `flux_mlp_weights.npz` — NPZ weights (optional).
-- `weights_bin/` — raw binary weights (optional).
+- `flux_mlp_best.pt` — best checkpoint.
 - `normalization_params.csv` — normalization parameters.
 
 ### Step 6: Run inference to generate the body force field

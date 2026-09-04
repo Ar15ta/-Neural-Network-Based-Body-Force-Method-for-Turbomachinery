@@ -54,7 +54,7 @@ Arisa_Benneke_Method/
 │
 ├── Bodyforce_Method/                 # 彻体力生成模块
 │   ├── NASA_ROTOR_37/                # NASA ROTOR 37 示例案例
-│   │   ├── ANN_Initial_Trainner.py   # Python 神经网络训练脚本
+│   │   ├── ANN_TrainOneMLP.py       # Python 神经网络训练脚本
 │   │   ├── ANN_Pre_Processing.C      # C++ 神经网络推理（LibTorch）
 │   │   ├── Benneke_Pre_Processing.C  # 传统 IDW 插值方法（对比参考）
 │   │   ├── BodyForceVisualizer.py    # 彻体力可视化工具
@@ -63,9 +63,8 @@ Arisa_Benneke_Method/
 │   │   │   └── best_parameters_separate.txt
 │   │   │
 │   │   ├── ANN_Output/               # 训练输出
-│   │   │   ├── flux_mlp_traced.pt    # TorchScript 模型
-│   │   │   ├── flux_mlp_weights.npz  # NPZ 权重
-│   │   │   ├── weights_bin/          # 原始二进制权重
+│   │   │   ├── flux_mlp_traced.pt    # TorchScript 模型（ANN_Pre_Processing 读取）
+│   │   │   ├── flux_mlp_best.pt      # 最优 checkpoint
 │   │   │   └── normalization_params.csv
 │   │   │
 │   │   ├── CFX_Output_Benneke_Flux.csv  # CFX 导出的通量数据
@@ -199,7 +198,7 @@ $$
 ### Step 0: 准备网格
 
 1. 画好**纯净流道全环网格**（叶片不参与几何建模，由彻体力 + 堵塞因子代替）。
-2. 导入到算例文件夹（`constant/polyMesh`）。本仓库提供了 `Rotor_37_Mesh.msh`，可用 `gmshToFoam` / `fluentMeshToFoam` 转换。
+2. 导入到算例文件夹（`constant/polyMesh`）。**本仓库已直接附带转换好的 `constant/polyMesh`**，无需任何网格文件即可运行；若自备网格，可用 `gmshToFoam` / `fluentMeshToFoam` 从 `.msh`/`.cas` 转换生成 `constant/polyMesh`。
 3. **务必做交界面黏合**：用 `mergePairs` / `stitchMesh` 或在导入时把分片区域胶合（glue）为连续网格，并用 `createPatch` 设定好进口、出口、壁面等边界。
 4. 定义 `ROTOR_FLUID` 单元区（cellZone）——彻体力只作用在该区域。
 
@@ -258,13 +257,12 @@ calculateBlockage
 
 ```bash
 # 读取 openFOAM_Input_Force.csv，输出到 ANN_Output/
-python ANN_Initial_Trainner.py
+python ANN_TrainOneMLP.py
 ```
 
 **输出文件**（`ANN_Output/`）：
 - `flux_mlp_traced.pt` — TorchScript 模型（C++ LibTorch 直接加载）
-- `flux_mlp_weights.npz` — NPZ 权重（可选）
-- `weights_bin/` — 原始二进制权重（可选）
+- `flux_mlp_best.pt` — 最优 checkpoint
 - `normalization_params.csv` — 归一化参数
 
 ### Step 6: 推理生成彻体力场

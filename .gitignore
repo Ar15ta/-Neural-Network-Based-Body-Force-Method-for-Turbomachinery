@@ -16,6 +16,9 @@ Make/linux64*/
 
 # 运行/分解时写出的网格辅助文件（真正网格在 constant/polyMesh）
 constant/fvMesh/
+
+# Python 训练过程中的临时检查点
+ANN_Output/model_best.pt
 log.*
 *.log
 foam.log
