@@ -14,15 +14,7 @@ FoamFile
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-// 体积堵塞源项
-volumeBlockage
-{
-    type            volumeBlockage;
-    volumePhase     volume;
-}
-
 // 动量方程源项 - 作用于U场
-// 直接读取 constant/bodyForce 彻体力场（由 ANN_Pre_Processing 生成）
 bodyForceSourceU
 {
     type            coded;
@@ -33,18 +25,22 @@ bodyForceSourceU
     cellZone        ROTOR_FLUID;
 
     codeInclude
-    #{
+    #{        
         #include "fvMesh.H"
         #include "volFields.H"
         #include "surfaceFields.H"
         #include "fvModels.H"
         #include "fvConstraints.H"
+        #include "unitConversion.H"
         #include "addToRunTimeSelectionTable.H"
         #include "fvMatrix.H"
+        #include "read.H"
+        #include "fvc.H"
+        #include "fvm.H"
     #};
 
     codeAddRhoSup
-    #{
+    #{        
         // 获取ROTOR_FLUID单元格区域
         label zoneID = mesh().cellZones().findIndex(word("ROTOR_FLUID"));
         if (zoneID == -1)
@@ -52,10 +48,13 @@ bodyForceSourceU
             FatalErrorInFunction
                 << "Cell zone ROTOR_FLUID not found" << exit(FatalError);
         }
+
         const cellZone& rotorZone = mesh().cellZones()[zoneID];
         const labelList& rotorCells = rotorZone;
-
-        // 读取 constant/bodyForce 彻体力场（单位质量力，dimAcceleration）
+        
+        // 获取场数据
+        
+        // 使用IOobject读取constant/bodyForce场
         IOobject bodyForceHeader
         (
             "bodyForce",
@@ -64,22 +63,22 @@ bodyForceSourceU
             IOobject::MUST_READ,
             IOobject::NO_WRITE
         );
+        
         volVectorField bodyForce(bodyForceHeader, mesh());
-
-        const volScalarField& rhoField = mesh().lookupObject<volScalarField>("rho");
+  
+        const volScalarField& rhoField = mesh().lookupObject<volScalarField>("rho");;
 
         forAll(rotorCells, i)
         {
             label celli = rotorCells[i];
-
-            // 动量源项：f_rhs -= rho * bodyForce * V
+            
+            // 最终动量源项
             eqn.source()[celli] -= rhoField[celli] * bodyForce[celli] * mesh().V()[celli];
         }
     #};
 }
 
 // 能量方程源项 - 作用于e场
-// 彻体力做功：功率 = (rho*bodyForce) · U_blade
 bodyForceSourceE
 {
     type            coded;
@@ -90,18 +89,22 @@ bodyForceSourceE
     cellZone        ROTOR_FLUID;
 
     codeInclude
-    #{
+    #{        
         #include "fvMesh.H"
         #include "volFields.H"
         #include "surfaceFields.H"
         #include "fvModels.H"
         #include "fvConstraints.H"
+        #include "unitConversion.H"
         #include "addToRunTimeSelectionTable.H"
         #include "fvMatrix.H"
+        #include "read.H"
+        #include "fvc.H"
+        #include "fvm.H"
     #};
 
     codeAddRhoSup
-    #{
+    #{        
         // 获取ROTOR_FLUID单元格区域
         label zoneID = mesh().cellZones().findIndex(word("ROTOR_FLUID"));
         if (zoneID == -1)
@@ -111,8 +114,8 @@ bodyForceSourceE
         }
         const cellZone& rotorZone = mesh().cellZones()[zoneID];
         const labelList& rotorCells = rotorZone;
-
-        // 读取 constant/bodyForce 彻体力场（单位质量力，dimAcceleration）
+        
+        // 使用IOobject读取constant/bodyForce场
         IOobject bodyForceHeader
         (
             "bodyForce",
@@ -121,32 +124,37 @@ bodyForceSourceE
             IOobject::MUST_READ,
             IOobject::NO_WRITE
         );
+        
         volVectorField bodyForce(bodyForceHeader, mesh());
-
+        
+        
         const volScalarField& rhoField = mesh().lookupObject<volScalarField>("rho");
+    
 
-        // 旋转参数（与转子一致）
+        // 定义旋转参数
         scalar rpm = 17188.7;
         scalar omega = rpm * (2.0 * M_PI) / 60.0;
-
+        
+        // 遍历ROTOR_FLUID区域，计算彻体力做功
         forAll(rotorCells, i)
         {
             label celli = rotorCells[i];
-
+            
             vector cellCenter = mesh().C()[celli];
-
-            // 叶片周向线速度: U_blade = Omega × r
+            
+            // 计算叶片线速度: U_blade = Omega × r
             scalar r = mag(vector(cellCenter.x(), cellCenter.y(), 0.0));
             scalar theta = Foam::atan2(cellCenter.y(), cellCenter.x());
             vector eTheta(-Foam::sin(theta), Foam::cos(theta), 0.0);
             vector U_blade = omega * r * eTheta;
-
-            // 彻体力做功功率密度：(rho*bodyForce) · U_blade
+            
+            // 计算彻体力做功：功率 = force · U_blade（叶片对流体做功）
             vector bodyForceDensity = rhoField[celli] * bodyForce[celli];
             scalar bodyForcePower = (bodyForceDensity & U_blade) * mesh().V()[celli];
-
-            // 能量源项
-            eqn.source()[celli] -= bodyForcePower;
+            
+            // 总功率
+            scalar totalPower = bodyForcePower;
+            eqn.source()[celli] -= totalPower; 
         }
     #};
 }

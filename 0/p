@@ -60,8 +60,8 @@ boundaryField
     OUTLET
     {
         type            fixedMean;
-        meanValue       129061;
-        value           uniform 129061;
+        meanValue       127892;
+        value           uniform 127892;
     }
     OUT_HUB
     {

@@ -7,10 +7,15 @@ processor*/
 postProcessing/
 dynamicCode/
 platforms/
+Make/linux64*/
+**/Make/linux64*/
 *.obj
 *.o
 *.dep
 *.so
+
+# 运行/分解时写出的网格辅助文件（真正网格在 constant/polyMesh）
+constant/fvMesh/
 log.*
 *.log
 foam.log

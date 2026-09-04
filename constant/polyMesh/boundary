@@ -16,116 +16,108 @@ FoamFile
 
 20
 (
-    INLET
-    {
-        type            patch;
-        nFaces          5508;
-        startFace       613044;
-    }
-    IN_HUB
-    {
-        type            wall;
-        inGroups        List<word> 1(wall);
-        nFaces          3240;
-        startFace       618552;
-    }
-    IN_SHROUD
-    {
-        type            wall;
-        inGroups        List<word> 1(wall);
-        nFaces          3240;
-        startFace       621792;
-    }
-    IN_TO_ROTOR
-    {
-        type            wall;
-        inGroups        List<word> 1(wall);
-        nFaces          5508;
-        startFace       625032;
-    }
     OUTLET
     {
         type            patch;
-        nFaces          4472;
-        startFace       630540;
-    }
-    OUT_HUB
-    {
-        type            wall;
-        inGroups        List<word> 1(wall);
-        nFaces          5848;
-        startFace       635012;
+        nFaces          4484;
+        startFace       938100;
     }
     OUT_SHROUD
     {
         type            wall;
         inGroups        List<word> 1(wall);
-        nFaces          5848;
-        startFace       640860;
+        nFaces          6608;
+        startFace       942584;
+    }
+    OUT_HUB
+    {
+        type            wall;
+        inGroups        List<word> 1(wall);
+        nFaces          6608;
+        startFace       949192;
     }
     OUT_TO_ROTOR
     {
         type            wall;
         inGroups        List<word> 1(wall);
-        nFaces          4472;
-        startFace       646708;
+        nFaces          4484;
+        startFace       955800;
+    }
+    INLET
+    {
+        type            patch;
+        nFaces          4484;
+        startFace       960284;
+    }
+    IN_SHROUD
+    {
+        type            wall;
+        inGroups        List<word> 1(wall);
+        nFaces          4248;
+        startFace       964768;
+    }
+    IN_HUB
+    {
+        type            wall;
+        inGroups        List<word> 1(wall);
+        nFaces          4248;
+        startFace       969016;
+    }
+    IN_TO_ROTOR
+    {
+        type            wall;
+        inGroups        List<word> 1(wall);
+        nFaces          4484;
+        startFace       973264;
     }
     ROTOR_HUB
     {
         type            wall;
         inGroups        List<word> 1(wall);
-        nFaces          4400;
-        startFace       651180;
-    }
-    ROTOR_TO_IN
-    {
-        type            wall;
-        inGroups        List<word> 1(wall);
-        nFaces          7600;
-        startFace       655580;
-    }
-    ROTOR_TO_OUT
-    {
-        type            wall;
-        inGroups        List<word> 1(wall);
-        nFaces          7600;
-        startFace       663180;
+        nFaces          6136;
+        startFace       977748;
     }
     ROTOR_SHROUD
     {
         type            wall;
         inGroups        List<word> 1(wall);
-        nFaces          4400;
-        startFace       670780;
+        nFaces          6136;
+        startFace       983884;
     }
-    nonConformalCyclic_on_IN_TO_ROTOR
+    ROTOR_TO_IN
     {
-        type            nonConformalCyclic;
-        inGroups        List<word> 1(nonConformalCyclic);
-        nFaces          0;
-        startFace       675180;
-        matchTolerance  0.0001;
-        neighbourPatch  nonConformalCyclic_on_ROTOR_TO_IN;
-        transformType   none;
-        originalPatch   IN_TO_ROTOR;
+        type            wall;
+        inGroups        List<word> 1(wall);
+        nFaces          4484;
+        startFace       990020;
+    }
+    ROTOR_TO_OUT
+    {
+        type            wall;
+        inGroups        List<word> 1(wall);
+        nFaces          4484;
+        startFace       994504;
     }
     nonConformalCyclic_on_ROTOR_TO_IN
     {
         type            nonConformalCyclic;
         inGroups        List<word> 1(nonConformalCyclic);
         nFaces          0;
-        startFace       675180;
+        startFace       998988;
         matchTolerance  0.0001;
         neighbourPatch  nonConformalCyclic_on_IN_TO_ROTOR;
         transformType   none;
         originalPatch   ROTOR_TO_IN;
     }
-    nonConformalError_on_IN_TO_ROTOR
+    nonConformalCyclic_on_IN_TO_ROTOR
     {
-        type            nonConformalError;
-        inGroups        List<word> 1(nonConformalError);
+        type            nonConformalCyclic;
+        inGroups        List<word> 1(nonConformalCyclic);
         nFaces          0;
-        startFace       675180;
+        startFace       998988;
+        matchTolerance  0.0001;
+        neighbourPatch  nonConformalCyclic_on_ROTOR_TO_IN;
+        transformType   none;
         originalPatch   IN_TO_ROTOR;
     }
     nonConformalError_on_ROTOR_TO_IN
@@ -133,37 +125,37 @@ FoamFile
         type            nonConformalError;
         inGroups        List<word> 1(nonConformalError);
         nFaces          0;
-        startFace       675180;
+        startFace       998988;
         originalPatch   ROTOR_TO_IN;
     }
-    nonConformalCyclic_on_OUT_TO_ROTOR
+    nonConformalError_on_IN_TO_ROTOR
     {
-        type            nonConformalCyclic;
-        inGroups        List<word> 1(nonConformalCyclic);
+        type            nonConformalError;
+        inGroups        List<word> 1(nonConformalError);
         nFaces          0;
-        startFace       675180;
-        matchTolerance  0.0001;
-        neighbourPatch  nonConformalCyclic_on_ROTOR_TO_OUT;
-        transformType   none;
-        originalPatch   OUT_TO_ROTOR;
+        startFace       998988;
+        originalPatch   IN_TO_ROTOR;
     }
     nonConformalCyclic_on_ROTOR_TO_OUT
     {
         type            nonConformalCyclic;
         inGroups        List<word> 1(nonConformalCyclic);
         nFaces          0;
-        startFace       675180;
+        startFace       998988;
         matchTolerance  0.0001;
         neighbourPatch  nonConformalCyclic_on_OUT_TO_ROTOR;
         transformType   none;
         originalPatch   ROTOR_TO_OUT;
     }
-    nonConformalError_on_OUT_TO_ROTOR
+    nonConformalCyclic_on_OUT_TO_ROTOR
     {
-        type            nonConformalError;
-        inGroups        List<word> 1(nonConformalError);
+        type            nonConformalCyclic;
+        inGroups        List<word> 1(nonConformalCyclic);
         nFaces          0;
-        startFace       675180;
+        startFace       998988;
+        matchTolerance  0.0001;
+        neighbourPatch  nonConformalCyclic_on_ROTOR_TO_OUT;
+        transformType   none;
         originalPatch   OUT_TO_ROTOR;
     }
     nonConformalError_on_ROTOR_TO_OUT
@@ -171,8 +163,16 @@ FoamFile
         type            nonConformalError;
         inGroups        List<word> 1(nonConformalError);
         nFaces          0;
-        startFace       675180;
+        startFace       998988;
         originalPatch   ROTOR_TO_OUT;
+    }
+    nonConformalError_on_OUT_TO_ROTOR
+    {
+        type            nonConformalError;
+        inGroups        List<word> 1(nonConformalError);
+        nFaces          0;
+        startFace       998988;
+        originalPatch   OUT_TO_ROTOR;
     }
 )
 

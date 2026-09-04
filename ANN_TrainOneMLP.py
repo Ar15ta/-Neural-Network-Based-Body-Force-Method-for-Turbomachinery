@@ -15,45 +15,18 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 
-class RandomFourierFeatures(nn.Module):
-    """
-    Random Fourier Features for mapping low-dim coordinates to high-dim feature space
-    Improves gradient accuracy and stability by capturing high-frequency information
-    """
-    def __init__(self, input_dim=2, rff_dim=128, sigma=1.0):
-        super().__init__()
-        self.input_dim = input_dim
-        self.rff_dim = rff_dim
-        self.sigma = sigma
-        
-        # Random projection matrix - fixed during training
-        B = torch.randn(input_dim, rff_dim // 2) * sigma
-        self.register_buffer('B', B)
-    
-    def forward(self, x):
-        x_proj = x @ self.B
-        return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
-
-
 class FluxMLP(nn.Module):
     """
     MLP to fit all known quantities from CFX: (rho, Trr, Trt, Trz, Ttt, Tzt, Tzz, lambda)
-    Input: (r, z) - 2D (normalized coordinates [0,1]) -> mapped to RFF space
+    Input: (r, z) - 2D (normalized coordinates [0,1])
     Output: 8D quantities in original physical units
     Purpose: give a smooth differentiable interpolation of the discrete CFD data
     """
-    def __init__(self, hidden_layers=4, hidden_dim=64, use_rff=True, rff_dim=128, rff_sigma=1.0):
+    def __init__(self, hidden_layers=4, hidden_dim=64):
         super().__init__()
-        self.use_rff = use_rff
-        
-        if use_rff:
-            self.rff = RandomFourierFeatures(input_dim=2, rff_dim=rff_dim, sigma=rff_sigma)
-            input_layer_dim = rff_dim
-        else:
-            input_layer_dim = 2
         
         layers = []
-        layers.append(nn.Linear(input_layer_dim, hidden_dim))
+        layers.append(nn.Linear(2, hidden_dim))
         layers.append(nn.SiLU())
         
         for _ in range(hidden_layers - 1):
@@ -71,8 +44,6 @@ class FluxMLP(nn.Module):
                 nn.init.zeros_(m.bias)
     
     def forward(self, x):
-        if self.use_rff:
-            x = self.rff(x)
         return self.net(x)
 
 
@@ -86,7 +57,7 @@ def compute_derivative(y, x, create_graph=True):
 
 
 class BodyForceCalculator:
-    def __init__(self, csv_path, hidden_layers=4, hidden_dim=64, use_rff=True, rff_dim=128, rff_sigma=1.0):
+    def __init__(self, csv_path, hidden_layers=4, hidden_dim=64):
         # Load and preprocess data
         self.df = pd.read_csv(csv_path)
         self.N = len(self.df)
@@ -129,18 +100,12 @@ class BodyForceCalculator:
         self.r.requires_grad = True
         self.z.requires_grad = True
         
-        # Target for MLP fitting - METHOD B: directly fit lambda * flux
-        # This avoids product derivative error: d(lambda*T) is learned directly
-        # Network outputs: [rho, lamda_Trr, lamda_Trt, lamda_Trz, lamda_Ttt, lamda_Tzt, lamda_Tzz, lamda]
+        # Target for MLP fitting - normalize EACH output channel independently
+        # Different quantities have very different magnitudes, we need normalization
+        # for balanced MSE - large magnitude shouldn't dominate small magnitude
         y_raw = np.stack([
-            self.rho_np,
-            self.lamda_np * self.Trr_np,
-            self.lamda_np * self.Trt_np,
-            self.lamda_np * self.Trz_np,
-            self.lamda_np * self.Ttt_np,
-            self.lamda_np * self.Tzt_np,
-            self.lamda_np * self.Tzz_np,
-            self.lamda_np
+            self.rho_np, self.Trr_np, self.Trt_np, self.Trz_np,
+            self.Ttt_np, self.Tzt_np, self.Tzz_np, self.lamda_np
         ], axis=1).astype(np.float32)
         
         # Normalize each channel to mean=0, std=1
@@ -152,22 +117,16 @@ class BodyForceCalculator:
         self.y_target_np = y_normalized
         self.y_target = torch.tensor(self.y_target_np, dtype=torch.float32, device=device)
         
-        print("Output normalization parameters per channel (METHOD B: direct lambda*flux fit):")
-        names = ['rho', 'lamda_Trr', 'lamda_Trt', 'lamda_Trz', 'lamda_Ttt', 'lamda_Tzt', 'lamda_Tzz', 'lambda']
+        print("Output normalization parameters per channel:")
+        names = ['rho', 'Trr', 'Trt', 'Trz', 'Ttt', 'Tzt', 'Tzz', 'lambda']
         for i, name in enumerate(names):
             print(f"  {name:>8}: mean={self.y_mean[0,i]:.2f}, std={self.y_std[0,i]:.2f}")
         
         # Initialize MLP
-        self.model = FluxMLP(hidden_layers, hidden_dim, use_rff, rff_dim, rff_sigma).to(device)
+        self.model = FluxMLP(hidden_layers, hidden_dim).to(device)
         
-        rff_info = f", RFF enabled (dim={rff_dim}, sigma={rff_sigma})" if use_rff else ", no RFF"
-        print(f"\nMLP initialized: {hidden_layers} hidden layers, {hidden_dim} hidden units{rff_info}")
-        total_params = sum(p.numel() for p in self.model.parameters())
-        print(f"Total parameters: {total_params}")
-        
-        # 确认模型在GPU上
-        if next(self.model.parameters()).is_cuda:
-            print(f"✅ 模型已加载到GPU，显存占用: {torch.cuda.memory_allocated()/1024**2:.2f} MB")
+        print(f"\nMLP initialized: {hidden_layers} hidden layers, {hidden_dim} hidden units")
+        print(f"Total parameters: {sum(p.numel() for p in self.model.parameters())}")
     
     def denormalize_coords(self, r_norm, z_norm):
         """Convert normalized coordinates back to physical coordinates (r, z) in meters"""
@@ -184,9 +143,10 @@ class BodyForceCalculator:
         
         # Custom schedule: 前 70000 epoch 余弦降到 1e-7，之后保持
         def lr_lambda(epoch):
-            if epoch >= 50000:
+            if epoch >= 150000:
                 return 1e-6 / lr
-            cos = torch.cos(torch.tensor(epoch * 3.1415926535 / 50000))
+            # Cosine decay from 1 to 1e-7 / lr over 0-70000
+            cos = torch.cos(torch.tensor(epoch * 3.1415926535 / 150000))
             return (1e-6 / lr + 0.5 * (1 - 1e-6 / lr) * (1 + cos.item()))
         
         scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
@@ -203,7 +163,6 @@ class BodyForceCalculator:
         channel_names = ['rho', 'Trr', 'Trt', 'Trz', 'Ttt', 'Tzt', 'Tzz', 'lambda']
         
         print(f"\nStarting fitting for {epochs} epochs...")
-        print(f"  Pure MSE training (no gradient constraint) - FAST mode")
         
         x_train = torch.cat([self.r, self.z], dim=1)
         
@@ -212,11 +171,7 @@ class BodyForceCalculator:
             y_pred = self.model(x_train)
             mse = torch.mean((y_pred - self.y_target)**2)
             mse_per_channel = torch.mean((y_pred - self.y_target)**2, dim=0)
-            
-            # Pure MSE loss - fastest
-            total_loss = mse
-            
-            total_loss.backward()
+            mse.backward()
             optimizer.step()
             scheduler.step()
             
@@ -227,7 +182,7 @@ class BodyForceCalculator:
             if (epoch + 1) % print_freq == 0 or epoch == 0:
                 lr_current = optimizer.param_groups[0]['lr']
                 mse_channel_list = mse_per_channel.detach().cpu().tolist()
-                print(f"Epoch {epoch+1}/{epochs}: MSE = {mse.item():.6e}, lr = {lr_current:.6e}")
+                print(f"Epoch {epoch+1}/{epochs}: MSE = {mse.item():.6e}, best = {best_mse:.6e}, lr = {lr_current:.6e}")
                 for i, name in enumerate(channel_names):
                     print(f"  {name:>8}: {mse_channel_list[i]:.6e}", end='')
                 print()
@@ -250,55 +205,22 @@ class BodyForceCalculator:
             y_std_torch = torch.tensor(self.y_std, dtype=torch.float32, device=device)
             y_pred = y_pred_normalized * y_std_torch + y_mean_torch
             
-            # Get original raw targets - METHOD B: use lambda*flux for comparison
+            # Get original raw targets
             y_raw_np = np.stack([
-                self.rho_np,
-                self.lamda_np * self.Trr_np,
-                self.lamda_np * self.Trt_np,
-                self.lamda_np * self.Trz_np,
-                self.lamda_np * self.Ttt_np,
-                self.lamda_np * self.Tzt_np,
-                self.lamda_np * self.Tzz_np,
-                self.lamda_np
+                self.rho_np, self.Trr_np, self.Trt_np, self.Trz_np,
+                self.Ttt_np, self.Tzt_np, self.Tzz_np, self.lamda_np
             ], axis=1).astype(np.float32)
             y_raw_torch = torch.tensor(y_raw_np, dtype=torch.float32, device=device)
             
             mse_per_channel = torch.mean((y_pred - y_raw_torch)**2, dim=0)
-            names = ['rho', 'lamda_Trr', 'lamda_Trt', 'lamda_Trz', 'lamda_Ttt', 'lamda_Tzt', 'lamda_Tzz', 'lambda']
+            names = ['rho', 'Trr', 'Trt', 'Trz', 'Ttt', 'Tzt', 'Tzz', 'lambda']
             print("\nMSE per quantity (original physical units):")
             for i, name in enumerate(names):
                 print(f"  {name:>8}: {mse_per_channel[i]:.6e}")
         
         # Save model
         torch.save(best_state, os.path.join(save_dir, 'flux_mlp_best.pt'))
-
-        # Export state_dict as compressed .npz for C++ loader and also write raw binary+shape files
-        try:
-            weights_np = {}
-            for k, v in best_state.items():
-                weights_np[k] = v.detach().cpu().numpy()
-            np.savez_compressed(os.path.join(save_dir, 'flux_mlp_weights.npz'), **weights_np)
-            print(f"State dict exported to: {os.path.join(save_dir, 'flux_mlp_weights.npz')}")
-
-            # Also write raw float32 binary files and shape files for direct C++ loading
-            bin_dir = os.path.join(save_dir, 'weights_bin')
-            os.makedirs(bin_dir, exist_ok=True)
-            for k, arr in weights_np.items():
-                # sanitize key into filename (replace os.sep and leading './')
-                safe_key = k.replace(os.path.sep, '_')
-                bin_path = os.path.join(bin_dir, safe_key + '.bin')
-                shape_path = os.path.join(bin_dir, safe_key + '.shape')
-                arr_f32 = arr.astype(np.float32, copy=False)
-                # write binary data
-                with open(bin_path, 'wb') as bf:
-                    bf.write(arr_f32.tobytes())
-                # write shape
-                with open(shape_path, 'w') as sf:
-                    sf.write(','.join(str(int(d)) for d in arr_f32.shape))
-            print(f"Also wrote raw bin+shape files to: {bin_dir}")
-        except Exception as e:
-            print(f"Warning: failed to export state_dict to npz or bin files: {e}")
-
+        
         # Export to TorchScript for LibTorch C++ inference
         self.model.eval()
         # Export to TorchScript for LibTorch C++ inference
@@ -325,8 +247,6 @@ class BodyForceCalculator:
                 f.write(f"{i},{name},{self.y_mean[0,i]:.12f},{self.y_std[0,i]:.12f}\n")
         print(f"Normalization parameters saved to: {os.path.join(save_dir, 'normalization_params.csv')}")
         
-        print("\n✓ FluxMLP预训练完成")
-        
         # Save history
         pd.DataFrame(history).to_csv(os.path.join(save_dir, 'fitting_history.csv'), index=False)
         
@@ -336,13 +256,13 @@ class BodyForceCalculator:
         return best_mse
     
     def plot_history(self, history, save_dir):
-        """Plot fitting history - MSE only"""
+        """Plot fitting history"""
+        # Use colors that are distinguishable
         colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', 
                  '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
-        channel_names = ['rho', 'lamda_Trr', 'lamda_Trt', 'lamda_Trz', 'lamda_Ttt', 'lamda_Tzt', 'lamda_Tzz', 'lambda']
+        channel_names = ['rho', 'Trr', 'Trt', 'Trz', 'Ttt', 'Tzt', 'Tzz', 'lambda']
         
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        ax1, ax2 = axes
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
         
         # Plot total average MSE and per-channel MSE
         ax1.semilogy(history['epoch'], history['total_mse'], 'k-', linewidth=2, label='Average')
@@ -350,9 +270,9 @@ class BodyForceCalculator:
         for i in range(8):
             ax1.semilogy(history['epoch'], mse_per_channel[:, i], 
                         '-', color=colors[i], linewidth=1, label=channel_names[i])
-        ax1.set_title('Field MSE Loss')
+        ax1.set_title('MSE Loss (average and per channel)')
         ax1.grid(True, alpha=0.3)
-        ax1.legend(loc='upper right', fontsize=7)
+        ax1.legend(loc='upper right', fontsize=8)
         
         # Plot learning rate
         ax2.semilogy(history['epoch'], history['lr'], 'k-', linewidth=1.5)
@@ -364,6 +284,7 @@ class BodyForceCalculator:
         plt.close()
         
         # Also save per-channel MSE to CSV
+        import pandas as pd
         df = pd.DataFrame({
             'epoch': history['epoch'],
             'total_mse': history['total_mse'],
@@ -388,69 +309,80 @@ class BodyForceCalculator:
         y_std_torch = torch.tensor(self.y_std, dtype=torch.float32, device=current_device)
         out = out_normalized * y_std_torch + y_mean_torch
         
-        # Extract fitted quantities - METHOD B: network directly outputs lambda*flux
-        # Network outputs: [rho, lamda_Trr, lamda_Trt, lamda_Trz, lamda_Ttt, lamda_Tzt, lamda_Tzz, lamda]
+        # Extract fitted quantities in original physical units
         rho = out[:, 0:1]
-        lamda_Trr = out[:, 1:2]
-        lamda_Trt = out[:, 2:3]
-        lamda_Trz = out[:, 3:4]
-        lamda_Ttt = out[:, 4:5]
-        lamda_Tzt = out[:, 5:6]
-        lamda_Tzz = out[:, 6:7]
+        Trr = out[:, 1:2]
+        Trt = out[:, 2:3]
+        Trz = out[:, 3:4]
+        Ttt = out[:, 4:5]
+        Tzt = out[:, 5:6]
+        Tzz = out[:, 6:7]
         lamda = out[:, 7:8]
         
         # Get physical coordinates r in METERS directly
         r_phys, _ = self.denormalize_coords(self.r, self.z)
+        
+        # Compute derivatives needed for momentum equations
+        # If CFX output already contains lambda (i.e., area averaging already accounts for blockage)
+        # then we don't need to multiply by lambda again
+        # Trr_in_CSV = lambda * Trr_true, so we just use Trr directly
         
         # Chain rule for derivatives:
         # Input to network: r_norm = (r - r_min) / (r_max - r_min)
         # We need d/dr (physical derivative in 1/m)
         # dr/dr_norm = (r_max - r_min) => d/dr = d/dr_norm / (r_max - r_min)
         
-        # METHOD B: network outputs lambda*flux directly
-        # No need to multiply lambda*T at runtime - we learn the product and differentiate directly
-        # This avoids product rule error accumulation
+        # Benneke original equation: CFX T does NOT contain lambda
+        # (1/r) d(lambda r T_rr)/dr + d(lambda T_rz)/dz - (lambda T_tt)/r = lambda rho f_r
+        # So we NEED lambda * T inside the derivative: d(lambda T)/dx
+        # The lambda on both sides CANNOT be simply cancelled because derivative of product
+        lamda_Trr = lamda * Trr
         d_lamda_Trr_dr_norm = compute_derivative(lamda_Trr, self.r)
         d_lamda_Trr_dr = d_lamda_Trr_dr_norm / (self.r_max - self.r_min)  # [Pa/m]
 
+        lamda_Trz = lamda * Trz
         d_lamda_Trz_dz_norm = compute_derivative(lamda_Trz, self.z)
         d_lamda_Trz_dz = d_lamda_Trz_dz_norm / (self.z_max - self.z_min)  # [Pa/m]
 
+        lamda_Trt = lamda * Trt
         d_lamda_Trt_dr_norm = compute_derivative(lamda_Trt, self.r)
         d_lamda_Trt_dr = d_lamda_Trt_dr_norm / (self.r_max - self.r_min)  # [Pa/m]
 
+        lamda_Tzt = lamda * Tzt
         d_lamda_Tzt_dz_norm = compute_derivative(lamda_Tzt, self.z)
         d_lamda_Tzt_dz = d_lamda_Tzt_dz_norm / (self.z_max - self.z_min)  # [Pa/m]
 
+        lamda_Tzz = lamda * Tzz
         d_lamda_Tzz_dz_norm = compute_derivative(lamda_Tzz, self.z)
         d_lamda_Tzz_dz = d_lamda_Tzz_dz_norm / (self.z_max - self.z_min)  # [Pa/m]
 
         # r-momentum: (1/r) d(lambda r Trr)/dr + d(lambda Trz)/dz - (lambda Ttt)/r = lambda rho f_r
         # (1/r) d(lambda r Trr)/dr = d(lambda Trr)/dr + (lambda Trr)/r
-        term1_r = d_lamda_Trr_dr + lamda_Trr / r_phys
+        term1_r = d_lamda_Trr_dr + (lamda * Trr) / r_phys
         term2_r = d_lamda_Trz_dz
-        term3_r = - lamda_Ttt / r_phys
+        term3_r = - (lamda * Ttt) / r_phys
         numerator_r = term1_r + term2_r + term3_r    # [Pa/m] = [N/m³]
         denom = lamda * rho                          # [kg/m³]
         denom = torch.clamp(denom, min=1e-12)
         f_r = numerator_r / denom                    # [m/s²] - CORRECT DIMENSION
 
         # theta-momentum: (1/r) d(lambda r Trt)/dr + d(lambda Tzt)/dz + (lambda Trt)/r = lambda rho f_theta
-        term1_theta = d_lamda_Trt_dr + lamda_Trt / r_phys
+        term1_theta = d_lamda_Trt_dr + (lamda * Trt) / r_phys
         term2_theta = d_lamda_Tzt_dz
-        term3_theta = + lamda_Trt / r_phys
+        term3_theta = + (lamda * Trt) / r_phys
         numerator_theta = term1_theta + term2_theta + term3_theta
         f_theta = numerator_theta / denom
 
         # z-momentum: (1/r) d(lambda r Trz)/dr + d(lambda Tzz)/dz = lambda rho f_z
-        d_lamda_Trz_dr_norm = compute_derivative(lamda_Trz, self.r)
+        lamda_Trz_d = lamda * Trz
+        d_lamda_Trz_dr_norm = compute_derivative(lamda_Trz_d, self.r)
         d_lamda_Trz_dr = d_lamda_Trz_dr_norm / (self.r_max - self.r_min)
-        term1_z = d_lamda_Trz_dr + lamda_Trz / r_phys
+        term1_z = d_lamda_Trz_dr + (lamda * Trz) / r_phys
         term2_z = d_lamda_Tzz_dz
         numerator_z = term1_z + term2_z
         f_z = numerator_z / denom
         
-        return f_r, f_theta, f_z, rho, lamda_Trr, lamda_Trt, lamda_Trz, lamda_Ttt, lamda_Tzt, lamda_Tzz, lamda
+        return f_r, f_theta, f_z, rho, Trr, Trt, Trz, Ttt, Tzt, Tzz, lamda
     
     def predict(self):
         """Compute predictions - already in physical units [m/s²], no conversion needed"""
@@ -497,21 +429,17 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     csv_path = os.path.join(script_dir, 'openFOAM_Input_Force.csv')
     save_dir = os.path.join(script_dir, 'ANN_Output')
-    epochs = 80000
-    hidden_layers = 4
-    hidden_dim = 64
-    use_rff = True
-    rff_dim = 64
-    rff_sigma = 1.0
+    epochs = 300000
+    hidden_layers = 6
+    hidden_dim = 128
     
     print("=" * 60)
     print("Smooth interpolation for Body Force calculation")
-    print("  METHOD B: directly fit lambda*flux for gradient accuracy")
-    print("  AGGRESSIVE EARLY STOPPING - stop BEFORE gradient divergence")
+    print("  Fit CFD averaged fluxes with MLP for differentiability")
     print("=" * 60)
     
     # Initialize
-    calculator = BodyForceCalculator(csv_path, hidden_layers, hidden_dim, use_rff, rff_dim, rff_sigma)
+    calculator = BodyForceCalculator(csv_path, hidden_layers, hidden_dim)
     
     # Fit the MLP to flux data
     best_mse = calculator.fit(epochs=epochs, lr=1e-3, print_freq=2500, save_dir=save_dir)

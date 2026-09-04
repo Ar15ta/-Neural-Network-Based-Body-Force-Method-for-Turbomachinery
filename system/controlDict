@@ -22,12 +22,12 @@ startTime       0;
 
 stopAt          endTime;
 
-endTime         5;
+endTime         0.02;
 
 deltaT          5e-6;
 
 // 启用可变时间步长控制
-adjustTimeStep  true;
+adjustTimeStep  false;
 
 // 最大库郎数
 maxCo           5.0;

@@ -84,8 +84,7 @@ public:
     }
 
     // Predict 8 flux quantities from physical coordinates (r, z)
-    // METHOD B: Returns [rho, lamda_Trr, lamda_Trt, lamda_Trz, lamda_Ttt, lamda_Tzt, lamda_Tzz, lambda] in physical units
-    // Network directly learns lambda*flux - no product needed at runtime
+    // Returns: [rho, Trr, Trt, Trz, Ttt, Tzt, Tzz, lambda] in physical units
     std::vector<double> predict(scalar r_phys, scalar z_phys)
     {
         // Normalize coordinates to [0, 1] - same as Python training
@@ -131,17 +130,8 @@ public:
         torch::Tensor z_norm = torch::empty({N}, torch::kFloat32);
 
         for (int64_t i = 0; i < N; i++) {
-            // Normalize coordinates
-            float r_norm_val = static_cast<float>((r_phys_vec[i] - r_min_) / (r_max_ - r_min_));
-            float z_norm_val = static_cast<float>((z_phys_vec[i] - z_min_) / (z_max_ - z_min_));
-            
-            // Clamp to [0, 1] to prevent extrapolation outside training data range
-            // This ensures stable predictions near boundaries
-            r_norm_val = std::max(0.0f, std::min(1.0f, r_norm_val));
-            z_norm_val = std::max(0.0f, std::min(1.0f, z_norm_val));
-            
-            r_norm[i] = r_norm_val;
-            z_norm[i] = z_norm_val;
+            r_norm[i] = static_cast<float>((r_phys_vec[i] - r_min_) / (r_max_ - r_min_));
+            z_norm[i] = static_cast<float>((z_phys_vec[i] - z_min_) / (z_max_ - z_min_));
         }
 
         r_norm.set_requires_grad(true);
@@ -158,68 +148,75 @@ public:
         auto y_std_t = torch::tensor(y_std_, torch::kFloat32).unsqueeze(0);
         auto output_phys = output * y_std_t + y_mean_t;
 
-        // Extract all physical quantities [N] - METHOD B: network outputs lambda*flux directly
-        auto rho        = output_phys.select(1, 0);
-        auto lamda_Trr  = output_phys.select(1, 1);
-        auto lamda_Trt  = output_phys.select(1, 2);
-        auto lamda_Trz  = output_phys.select(1, 3);
-        auto lamda_Ttt  = output_phys.select(1, 4);
-        auto lamda_Tzt  = output_phys.select(1, 5);
-        auto lamda_Tzz  = output_phys.select(1, 6);
-        auto lamda      = output_phys.select(1, 7);
+        // Extract all physical quantities [N]
+        auto rho    = output_phys.select(1, 0);
+        auto Trr    = output_phys.select(1, 1);
+        auto Trt    = output_phys.select(1, 2);
+        auto Trz    = output_phys.select(1, 3);
+        auto Ttt    = output_phys.select(1, 4);
+        auto Tzt    = output_phys.select(1, 5);
+        auto Tzz    = output_phys.select(1, 6);
+        auto lamda  = output_phys.select(1, 7);
+
+        // Tensors for autograd (already in batch form)
+        // output_phys is already denormalized, just select directly
+        auto lamda_T = output_phys.select(1, 7);
+        auto Trr_T   = output_phys.select(1, 1);
+        auto Trt_T   = output_phys.select(1, 2);
+        auto Trz_T   = output_phys.select(1, 3);
+        auto Tzt_T   = output_phys.select(1, 5);
+        auto Tzz_T   = output_phys.select(1, 6);
 
         // Compute all derivatives - batch mode
-        // METHOD B: network directly outputs lambda*flux - no product needed!
         // retain_graph=True for all except last
 
-        // d(lamda_Trr)/dr (lamda_Trr is direct network output)
-        lamda_Trr.sum().backward(torch::Tensor(), /*retain_graph*/true);
+        // d(lambda*Trr)/dr
+        (lamda_T * Trr_T).sum().backward(torch::Tensor(), /*retain_graph*/true);
         auto dlamTrr_dr = r_norm.grad() / (r_max_ - r_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Trz)/dz
-        lamda_Trz.sum().backward(torch::Tensor(), /*retain_graph*/true);
+        // d(lambda*Trz)/dz
+        (lamda_T * Trz_T).sum().backward(torch::Tensor(), /*retain_graph*/true);
         auto dlamTrz_dz = z_norm.grad() / (z_max_ - z_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Trt)/dr
-        lamda_Trt.sum().backward(torch::Tensor(), /*retain_graph*/true);
+        // d(lambda*Trt)/dr
+        (lamda_T * Trt_T).sum().backward(torch::Tensor(), /*retain_graph*/true);
         auto dlamTrt_dr = r_norm.grad() / (r_max_ - r_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Tzt)/dz
-        lamda_Tzt.sum().backward(torch::Tensor(), /*retain_graph*/true);
+        // d(lambda*Tzt)/dz
+        (lamda_T * Tzt_T).sum().backward(torch::Tensor(), /*retain_graph*/true);
         auto dlamTzt_dz = z_norm.grad() / (z_max_ - z_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Tzz)/dz
-        lamda_Tzz.sum().backward(torch::Tensor(), /*retain_graph*/true);
+        // d(lambda*Tzz)/dz
+        (lamda_T * Tzz_T).sum().backward(torch::Tensor(), /*retain_graph*/true);
         auto dlamTzz_dz = z_norm.grad() / (z_max_ - z_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Trz)/dr (for z-momentum)
-        lamda_Trz.sum().backward();
+        // d(lambda*Trz)/dr (for z-momentum)
+        (lamda_T * Trz_T).sum().backward();
         auto dlamTrz_dr = r_norm.grad() / (r_max_ - r_min_);
 
         // Benneke body force equations - vectorized
         auto denom = lamda * rho;
         denom = denom.clamp_min(1e-12);
 
-        // r-momentum - use lamda_xxx directly (no lamda* needed)
-        auto r_phys_t = torch::tensor(r_phys_vec, torch::kFloat32);
-        auto term1_r = dlamTrr_dr + lamda_Trr / r_phys_t;
+        // r-momentum
+        auto term1_r = dlamTrr_dr + (lamda * Trr) / torch::tensor(r_phys_vec, torch::kFloat32);
         auto term2_r = dlamTrz_dz;
-        auto term3_r = - lamda_Ttt / r_phys_t;
+        auto term3_r = -(lamda * Ttt) / torch::tensor(r_phys_vec, torch::kFloat32);
         auto f_r = (term1_r + term2_r + term3_r) / denom;
 
         // theta-momentum
-        auto term1_theta = dlamTrt_dr + lamda_Trt / r_phys_t;
+        auto term1_theta = dlamTrt_dr + (lamda * Trt) / torch::tensor(r_phys_vec, torch::kFloat32);
         auto term2_theta = dlamTzt_dz;
-        auto term3_theta = lamda_Trt / r_phys_t;
+        auto term3_theta = (lamda * Trt) / torch::tensor(r_phys_vec, torch::kFloat32);
         auto f_theta = (term1_theta + term2_theta + term3_theta) / denom;
 
         // z-momentum
-        auto term1_z = dlamTrz_dr + lamda_Trz / r_phys_t;
+        auto term1_z = dlamTrz_dr + (lamda * Trz) / torch::tensor(r_phys_vec, torch::kFloat32);
         auto term2_z = dlamTzz_dz;
         auto f_z = (term1_z + term2_z) / denom;
 
@@ -265,77 +262,77 @@ public:
         auto x = torch::cat({r_norm, z_norm}, 0).unsqueeze(0);
         auto output = model_.forward({x}).toTensor().squeeze(0);
 
-        // Extract physical quantities - METHOD B: network outputs lambda*flux directly
-        double rho        = output[0].item<float>() * y_std_[0] + y_mean_[0];
-        double lamda_Trr  = output[1].item<float>() * y_std_[1] + y_mean_[1];
-        double lamda_Trt  = output[2].item<float>() * y_std_[2] + y_mean_[2];
-        double lamda_Trz  = output[3].item<float>() * y_std_[3] + y_mean_[3];
-        double lamda_Ttt  = output[4].item<float>() * y_std_[4] + y_mean_[4];
-        double lamda      = output[7].item<float>() * y_std_[7] + y_mean_[7];
+        // Extract physical quantities
+        double rho    = output[0].item<float>() * y_std_[0] + y_mean_[0];
+        double Trr    = output[1].item<float>() * y_std_[1] + y_mean_[1];
+        double Trt    = output[2].item<float>() * y_std_[2] + y_mean_[2];
+        double Trz    = output[3].item<float>() * y_std_[3] + y_mean_[3];
+        double Ttt    = output[4].item<float>() * y_std_[4] + y_mean_[4];
+        double lamda  = output[7].item<float>() * y_std_[7] + y_mean_[7];
 
-        // Tensor for autograd - METHOD B: no product needed!
-        auto lamda_Trr_T = output[1] * y_std_[1] + y_mean_[1];
-        auto lamda_Trt_T = output[2] * y_std_[2] + y_mean_[2];
-        auto lamda_Trz_T = output[3] * y_std_[3] + y_mean_[3];
-        auto lamda_Tzt_T = output[5] * y_std_[5] + y_mean_[5];
-        auto lamda_Tzz_T = output[6] * y_std_[6] + y_mean_[6];
+        // Tensor for autograd (keep in normalized form for differentiation)
+        auto lamda_T = output[7] * y_std_[7] + y_mean_[7];
+        auto Trr_T   = output[1] * y_std_[1] + y_mean_[1];
+        auto Trt_T   = output[2] * y_std_[2] + y_mean_[2];
+        auto Trz_T   = output[3] * y_std_[3] + y_mean_[3];
+        auto Tzt_T   = output[5] * y_std_[5] + y_mean_[5];
+        auto Tzz_T   = output[6] * y_std_[6] + y_mean_[6];
 
         // Compute derivatives with automatic differentiation
         // Chain rule: d/dr_phys = d/dr_norm / (r_max - r_min)
-        // METHOD B: network directly outputs lambda*flux - just differentiate directly
 
-        // d(lamda_Trr)/dr
+        // d(lambda*Trr)/dr
         // retain_graph=True because we need to do multiple backward passes on the same graph
-        lamda_Trr_T.backward(torch::Tensor(), /*retain_graph*/true);
+        (lamda_T * Trr_T).backward(torch::Tensor(), /*retain_graph*/true);
         double dlamTrr_dr = r_norm.grad()[0].item<double>() / (r_max_ - r_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Trz)/dz
-        lamda_Trz_T.backward(torch::Tensor(), /*retain_graph*/true);
+        // d(lambda*Trz)/dz
+        (lamda_T * Trz_T).backward(torch::Tensor(), /*retain_graph*/true);
         double dlamTrz_dz = z_norm.grad()[0].item<double>() / (z_max_ - z_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Trt)/dr
-        lamda_Trt_T.backward(torch::Tensor(), /*retain_graph*/true);
+        // d(lambda*Trt)/dr
+        (lamda_T * Trt_T).backward(torch::Tensor(), /*retain_graph*/true);
         double dlamTrt_dr = r_norm.grad()[0].item<double>() / (r_max_ - r_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Tzt)/dz
-        lamda_Tzt_T.backward(torch::Tensor(), /*retain_graph*/true);
+        // d(lambda*Tzt)/dz
+        (lamda_T * Tzt_T).backward(torch::Tensor(), /*retain_graph*/true);
         double dlamTzt_dz = z_norm.grad()[0].item<double>() / (z_max_ - z_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Tzz)/dz
-        lamda_Tzz_T.backward(torch::Tensor(), /*retain_graph*/true);
+        // d(lambda*Tzz)/dz
+        (lamda_T * Tzz_T).backward(torch::Tensor(), /*retain_graph*/true);
         double dlamTzz_dz = z_norm.grad()[0].item<double>() / (z_max_ - z_min_);
         r_norm.grad().zero_(); z_norm.grad().zero_();
 
-        // d(lamda_Trz)/dr (for z-momentum)
+        // d(lambda*Trz)/dr (for z-momentum)
         // Last backward pass - don't need to retain graph anymore
-        lamda_Trz_T.backward();
+        (lamda_T * Trz_T).backward();
         double dlamTrz_dr = r_norm.grad()[0].item<double>() / (r_max_ - r_min_);
 
         // =============================================================
-        // Benneke body force equations - METHOD B
+        // Benneke body force equations
         // =============================================================
         // r-momentum: (1/r) d(lambda r Trr)/dr + d(lambda Trz)/dz - (lambda Ttt)/r = lambda rho f_r
         // (1/r) d(lambda r Trr)/dr = d(lambda Trr)/dr + (lambda Trr)/r
-        const double term1_r = dlamTrr_dr + lamda_Trr / r_phys;
+        const double term1_r = dlamTrr_dr + (lamda * Trr) / r_phys;
         const double term2_r = dlamTrz_dz;
-        const double term3_r = - lamda_Ttt / r_phys;
+        const double term3_r = -(lamda * Ttt) / r_phys;
         const double numerator_r = term1_r + term2_r + term3_r;
         const double denom = lamda * rho;
         const double f_r = numerator_r / denom;
 
         // theta-momentum: (1/r) d(lambda r Trt)/dr + d(lambda Tzt)/dz + (lambda Trt)/r = lambda rho f_theta
-        const double term1_theta = dlamTrt_dr + lamda_Trt / r_phys;
+        const double term1_theta = dlamTrt_dr + (lamda * Trt) / r_phys;
         const double term2_theta = dlamTzt_dz;
-        const double term3_theta = + lamda_Trt / r_phys;
+        const double term3_theta = +(lamda * Trt) / r_phys;
         const double numerator_theta = term1_theta + term2_theta + term3_theta;
         const double f_theta = numerator_theta / denom;
 
         // z-momentum: (1/r) d(lambda r Trz)/dr + d(lambda Tzz)/dz = lambda rho f_z
-        const double term1_z = dlamTrz_dr + lamda_Trz / r_phys;
+        const double term1_z = dlamTrz_dr + (lamda * Trz) / r_phys;
         const double term2_z = dlamTzz_dz;
         const double numerator_z = term1_z + term2_z;
         const double f_z = numerator_z / denom;
