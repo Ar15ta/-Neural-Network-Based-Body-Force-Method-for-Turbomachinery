@@ -1,7 +1,23 @@
-# 编译配置
+# 编译配置（OpenFOAM wmake）
+# 用法：wmake 通过 Make/files 只能编译一个可执行程序，
+#       因此下面三个工具一次只保留一个处于"激活"状态（未注释），
+#       其余保持注释。切换工具时注释/取消注释对应两行后重新 wmake 即可。
+#
+# 注意：本文件夹名为 make，OpenFOAM 默认读取 Make/files；
+#       若 wmake 提示找不到，请将文件夹重命名为 Make 后再 wmake。
+
+# === 移动最小二乘（MLS）彻体力前处理，不依赖 LibTorch ===
+SOURCE += MLS_Pre_Processing.C
+EXE = $(FOAM_USER_APPBIN)/MLS_Pre_Processing
+
+# === 神经网络（ANN）彻体力前处理，依赖 LibTorch（见 Make/options） ===
+# SOURCE += ANN_Pre_Processing.C
+# EXE = $(FOAM_USER_APPBIN)/ANN_Pre_Processing
+
+# === 堵塞因子计算，不依赖 LibTorch ===
 # SOURCE += calculateBlockage.C
 # EXE = $(FOAM_USER_APPBIN)/calculateBlockage
-# URCE += ANN_Pre_Processing.C
-# EXE = $(FOAM_USER_APPBIN)/ANN_Pre_Processing
-SOURCE += Sampler.C
-EXE = $(FOAM_USER_APPBIN)/Sampler
+
+# === RBF（Benneke）彻体力前处理，不依赖 LibTorch ===
+# SOURCE += Benneke_Pre_Processing.C
+# EXE = $(FOAM_USER_APPBIN)/Benneke_Pre_Processing

@@ -220,18 +220,31 @@ wmake          # 需要 OpenFOAM v13
 cd ..
 ```
 
-### Step 3: 编译两个预处理工具
+### Step 3: 编译预处理工具
 
-`calculateBlockage` 和 `ANN_Pre_Processing` 是单个 `.C` 文件的独立工具，在算例文件夹下用 `wmake` 编译（每个工具需要自己的 `Make/files` 与 `Make/options`，`Make/options` 中指向你的 LibTorch 路径）：
+彻体力场的生成有三种方法，均为算例文件夹下的单个 `.C` 文件工具，用 `wmake` 编译（共享同一份 `Make/files` 与 `Make/options`）：
+
+| 工具 | 方法 | 依赖 |
+|------|------|------|
+| `ANN_Pre_Processing.C` | 神经网络 + 自动微分（**推荐，本项目主方法**） | LibTorch |
+| `MLS_Pre_Processing.C` | 移动最小二乘（Moving Least Squares）局部多项式加权拟合 | 无 |
+| `Benneke_Pre_Processing.C` | 传统 RBF/IDW 插值（对比参考） | 无 |
+| `calculateBlockage.C` | 堵塞因子 λ 与训练数据生成 | 无 |
+
+`wmake` 一次只能编译一个可执行程序：打开 `Make/files`，把要编译的那一组 `SOURCE += xxx.C` / `EXE = ...` 两行取消注释、其余注释掉，然后 `wmake`。仓库 `make/files` 已写好全部配置并默认激活 `MLS_Pre_Processing.C`。
+
+> 注意：仓库目录名是小写 `make`，而 OpenFOAM 默认读取 `Make/files`；若 `wmake` 找不到文件，请把目录重命名为 `Make`（`mv make Make`）后再编译。
 
 ```bash
-# 编译堵塞因子计算工具（Make/files 中：SOURCE += calculateBlockage.C; EXE = $(FOAM_USER_APPBIN)/calculateBlockage）
+# 例：编译神经网络工具（在 Make/files 中激活 ANN_Pre_Processing.C 两行）
 wmake
-# 编译神经网络推理工具（Make/files 中：SOURCE += ANN_Pre_Processing.C; EXE = $(FOAM_USER_APPBIN)/ANN_Pre_Processing）
+# 例：编译移动最小二乘工具（在 Make/files 中激活 MLS_Pre_Processing.C 两行）
+wmake
+# 例：编译堵塞因子工具（在 Make/files 中激活 calculateBlockage.C 两行）
 wmake
 ```
 
-> 提示：`make/options` 里的 LibTorch 路径（如 `/home/dyfluid/libtorch`）需改成你自己的路径。`ANN_Pre_Processing` 依赖 LibTorch；`calculateBlockage` 不依赖。
+> 提示：`Make/options` 里的 LibTorch 路径（如 `/home/dyfluid/libtorch`）需改成你自己的路径。只有 `ANN_Pre_Processing` 依赖 LibTorch；`MLS_Pre_Processing`、`Benneke_Pre_Processing`、`calculateBlockage` 均不依赖。
 
 ### Step 4: 计算堵塞因子并生成训练数据
 
@@ -265,7 +278,9 @@ ANN_Pre_Processing
 - `constant/bodyForce` — 彻体力向量场（单位质量力，dimAcceleration）
 - `constant/lambda` — 堵塞因子标量场（Step 4 已生成）
 
-> 也可用传统 RBF+IDW 方法 `Benneke_Pre_Processing` 作对比参考（需补充超参数）。
+> 不使用神经网络时，可用两种传统插值方法替代 Step 5/6 直接生成 `constant/bodyForce`（均读 `openFOAM_Input_Force.csv`，无需训练、无需 LibTorch）：
+> - **移动最小二乘（MLS）**：`MLS_Pre_Processing`，在邻域内做高斯加权局部多项式拟合，系数直接给出光滑函数值与解析梯度。
+> - **RBF/IDW（Benneke 方法）**：`Benneke_Pre_Processing`，需自行提供 `optimization_results/best_flux_parameters.txt` 超参数。
 
 ### Step 7: 全环非定常计算
 
