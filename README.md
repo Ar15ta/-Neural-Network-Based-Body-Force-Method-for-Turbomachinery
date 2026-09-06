@@ -396,7 +396,144 @@ R,Rho,Trr,Trt,Trz,Ttt,Tzt,Tzz,Z,Lamda
 | `openFOAM_Input_Force.csv` | 金属堵塞计算程序输出 | 训练数据集 |
 | `optimization_results/best_parameters_separate.txt` | RBF 插值优化结果 | 堵塞因子计算超参数 |
 
-## 11. 参考文献
+## 11. OpenFOAM 算例详细设置（NASA Rotor 37）
+
+本章给出随仓库发布的 NASA Rotor 37 算例的完整数值设置，供论文撰写与算例复现使用。算例基于 **OpenFOAM v13**，采用自定义求解器 **ArisaSTALL** 在全环纯净流道网格上求解带金属堵塞修正的可压缩欧拉方程，彻体力场由 `fvModels` 以 coded 源项方式注入。
+
+### 11.1 求解器特点（ArisaSTALL）
+
+ArisaSTALL 继承自 OpenFOAM v13 的 `fluid` 基类，是一个**带金属堵塞因子 λ 修正的可压缩欧拉求解器**（详见 [ArisaSTALL/Solver_README.md](ArisaSTALL/Solver_README.md)）。其核心特点：
+
+- **彻体力方法（BFM）专用**：网格为不含叶片的纯净流道，叶片效应由两部分等效——① 彻体力源项（动量/能量）；② 金属堵塞因子 λ（0 < λ ≤ 1，表示周向通流面积占比）对方程组的几何修正。
+- **λ 修正贯穿全方程组**：
+  - 动量预测：`λ·fvm::ddt(ρ,U) + fvm::div(λ_f·φ, U) == -fvc::grad(λ·p) + λ·源项`；
+  - 压力修正（transonic + consistent PIMPLE）：压力方程含 `ψ·ddt(λ·p)`、`div(λ_f·φHbyA)` 与 `laplacian(λ·ρ·rAAtU_f, p)`，速度修正为 `U = HbyA - λ·rAAtU·grad(p)`，密度修正方程同样含 λ；
+  - 能量预测（内能形式）：`λ·ddt(ρ,h_e) + div(λ_f·φ, h_e) + λ·ddt(ρ,K) + div(λ_f·φ, K)`，压力功项为 `div(λ_f·φ, p/ρ)`。
+- **无湍流/无粘**：`momentumTransportPredictor/Corrector` 与 `thermophysicalTransportPredictor/Corrector` 均为空函数，求解器不求解任何湍流输运方程。
+- λ 场从 `constant/lambda` 读取（`READ_IF_PRESENT`）；缺失时回退到 `fvSolution` 中的 `lambdaDefault` 值。
+- 编译产物为 `$FOAM_USER_LIBBIN/libArisaSTALL.so`，由 `controlDict` 中 `solver ArisaSTALL;` 经 `foamRun` 加载。
+
+### 11.2 彻体力源项注入（constant/fvModels）
+
+两个 `coded` 源项均只作用于 `cellZone ROTOR_FLUID`（即转子叶片排区域）：
+
+| 源项 | 作用方程 | 数学形式 | 说明 |
+|------|----------|----------|------|
+| `bodyForceSourceU` | 动量 U | `S_U = -ρ·bodyForce·V_cell` | 读取 `constant/bodyForce`（单位质量彻体力，dimAcceleration） |
+| `bodyForceSourceE` | 能量 e | `S_e = -(ρ·bodyForce·U_blade)·V_cell` | 叶片对流体做功的功率源 |
+
+能量源中叶片转速 **n = 17188.7 rpm**（ω = 2πn/60），叶片线速度按当地半径取周向分量 `U_blade = ω·r·e_θ`，彻体力功率为彻体力与叶片速度的内积。
+
+### 11.3 时间步与运行控制（system/controlDict）
+
+| 参数 | 值 | 说明 |
+|------|----|------|
+| `solver` | `ArisaSTALL` | 自定义求解器 |
+| `endTime` | 0.02 s | 约 5.7 个转子转动周期（17188.7 rpm ≈ 286.5 Hz） |
+| `deltaT` | 5×10⁻⁶ s | 固定时间步 |
+| `adjustTimeStep` | `false` | 不自动调整步长（`maxCo 5.0`、`maxDeltaT 5×10⁻⁵` 仅为自适应预留） |
+| `writeControl` | `adjustableRunTime` | 每 `writeInterval 1×10⁻⁴ s` 写一帧，`purgeWrite 6` 仅保留最近 6 帧 |
+| `runTimeModifiable` | `true` | 运行中可修改字典 |
+
+> 注意：随仓库发布的 `system/fvSchemes` 中 `ddtSchemes` 默认为 `steadyState`（伪时间/定常推进），`Euler` 方案被注释。做**非定常计算时需将默认方案改为 `Euler`**（一阶隐式），此时上述 `deltaT`、`endTime` 才具有真实物理时间意义。
+
+### 11.4 空间离散格式（system/fvSchemes）
+
+| 类别 | 设置 |
+|------|------|
+| 时间项 `ddtSchemes` | `default steadyState`（发布配置；非定常计算切换为 `Euler`） |
+| 梯度 `gradSchemes` | `default Gauss linear`（二阶中心） |
+| 对流项 `divSchemes` | `div(phi,U)`、`div(phid,p)`、`div(phi,e)`、`div(phi,(p\|rho))` 均为 `Gauss limitedLinear 0.7`；`div(phi,K)` 为 `Gauss limitedLinear 1`（二阶、有界，限制系数 0.7） |
+| λ 加权对流项 | `div((interpolate(lambda)*phi), U/K/e/(p\|rho))` 同为 `Gauss limitedLinear 0.7`（λ 由单元内插至面心加权通量） |
+| 粘性应力项 | `div(((rho*nuEff)*dev2(T(grad(U))))) Upwind`（无粘计算中 μ≈0，该项实际不贡献） |
+| 拉普拉斯 `laplacianSchemes` | `default Gauss linear corrected`（面法向梯度显式非正交修正） |
+| 面插值 `interpolationSchemes` | `default linear` |
+| 面法向梯度 `snGradSchemes` | `default corrected` |
+
+### 11.5 线性求解器与 PIMPLE 算法（system/fvSolution）
+
+**线性求解器：**
+
+| 场 | 求解器 | 光滑器/预条件 | tolerance | relTol |
+|----|--------|---------------|-----------|--------|
+| `p.*` | GAMG（几何代数多重网格，`cacheAgglomeration`，`nCellsInCoarsestLevel 20`） | DIC/Gauss-Seidel | 1×10⁻⁶ | 0 |
+| `(U\|e\|h).*`、`rho.*` | smoothSolver | DILU/Gauss-Seidel | 1×10⁻⁶ ~ 1×10⁻⁸ | 0 ~ 0.01 |
+
+**PIMPLE 算法：**
+
+| 参数 | 值 | 说明 |
+|------|----|------|
+| `nOuterCorrectors` | 50 | 每个时间步外修正（伪时间迭代）次数 |
+| `nCorrectors` | 2 | 压力方程内修正次数 |
+| `nNonOrthogonalCorrectors` | 1 | 非正交修正次数 |
+| `correctMeshPhi` | yes | |
+| `consistent` | yes | consistent PIMPLE 形式（rAAtU 系数） |
+| `transonic` | yes | 跨声速模式，压力方程含 `ψ·ddt(p)` 项 |
+| 内迭代残差判据 | U/p/e = 1×10⁻⁶ | `residualControl` |
+| 外修正残差判据 | U、p：tolerance 4×10⁻²，relTol 0.01 | `outerCorrectorResidualControl` |
+| 松弛因子 | p = 0.4（`pFinal` = 1.0）；各方程 `".*"` = 0.4 | 定常/伪时间推进下的欠松弛 |
+
+**场值限制（system/fvConstraints）：** `limitPressure`（minFactor 0.1，maxFactor 3）与 `limitTemperature`（200 K ≤ T ≤ 1000 K），用于抑制迭代初期非物理振荡。
+
+### 11.6 湍流方法
+
+**无粘（欧拉）设置**，不使用任何湍流模型：
+
+- `constant/momentumTransport`：`simulationType laminar;`（层流框架下关闭湍流输运）；
+- `constant/physicalProperties`：动力粘度 **μ = 1×10⁻¹⁰ Pa·s**（近零，等效无粘）；
+- 固壁边界采用 **slip（滑移）** 条件，无壁面摩擦、无边界层求解。
+
+彻体力模型本身已在源项中包含叶片排的耗散/转向效应，因此无需 RANS 闭合。
+
+### 11.7 工质物性（constant/physicalProperties）
+
+按**量热完全气体空气**处理，采用 OpenFOAM 热力学模板组合 `hePsiThermo / pureMixture / const / hConst / perfectGas / specie / sensibleInternalEnergy`：
+
+| 属性 | 值 |
+|------|----|
+| 摩尔质量 | 28.9 g/mol |
+| 定压比热 Cp | 1005 J/(kg·K)（常数） |
+| 比热比 γ | 1.4（由 Cp、Pr 等推得） |
+| 生成焓 hf | 0 |
+| 动力粘度 μ | 1×10⁻¹⁰ Pa·s（无粘） |
+| 普朗特数 Pr | 0.71 |
+
+### 11.8 边界条件（0/ 目录）
+
+| 边界 | p | U | T |
+|------|-----|------|-----|
+| INLET（进口） | `totalPressure`，p₀ = 101325 Pa | `pressureInletOutletVelocity` | `totalTemperature`，T₀ = 288.15 K，γ = 1.4 |
+| OUTLET（出口） | `fixedMean`，平均静压 127892 Pa（反压，对应特定工况点） | `pressureInletOutletVelocity` | zeroGradient |
+| 轮毂/机匣壁面（IN/OUT/ROTOR_HUB、_SHROUD） | zeroGradient | **slip**（滑移壁面） | hub/shroud 壁面 `fixedValue` 288.15 K |
+| 转-静交界面 | cyclic（见 11.9） | cyclic | zeroGradient |
+
+初始场：`p = 101325 Pa`，`U = (0 0 120) m/s`（轴向），`T = 288.15 K`。
+
+### 11.9 转-静交界面处理
+
+网格沿轴向分为进口段、转子段（ROTOR_FLUID）、出口段三个区域，区域间通过 **`nonConformalCyclic`（非共形循环/非匹配交界面）** 连接，共两对：
+
+- `nonConformalCyclic_on_ROTOR_TO_IN` ↔ `nonConformalCyclic_on_IN_TO_ROTOR`（转子–进口段）；
+- `nonConformalCyclic_on_ROTOR_TO_OUT` ↔ `nonConformalCyclic_on_OUT_TO_ROTOR`（转子–出口段）。
+
+设置 `matchTolerance 0.0001`、`transformType none`（交界面两侧坐标一致，无需坐标变换），并配有 `nonConformalError` 补丁用于诊断非匹配面积。该交界面允许两侧网格节点不一一对应，通量通过面权重加权插值传递，适合彻体力模型中"叶片排独立建网、再拼接"的建模方式。由于叶片效应已全部由彻体力 + λ 等效，交界面两侧均在同一绝对坐标系下求解，**不使用 MRF/AMI 旋转参考系**。
+
+### 11.10 网格、区域与并行
+
+- **网格**：全环三维纯净流道六面体网格，共 **322,848 个单元**；
+- **cellZone**：`ROTOR_FLUID`（彻体力作用区）、`IN_FLUID`、`OUT_FLUID` 三个区域；
+- **堵塞因子场**：`constant/lambda` 为 322,848 个单元值的非均匀 volScalarField；
+- **并行**：`system/decomposeParDict` 采用 **scotch** 方法自动分区，**8 核**；运行脚本 `For_Nasa_Rotor_37_Body_Force.sh` 自动执行 `decomposePar -constant`、`decomposePar -fields` 后 `mpirun -np 8 foamRun -parallel`。
+
+### 11.11 运行监测（system/functions）
+
+- `residuals`：各场残差输出；
+- `patchFlowRate`：统计 OUTLET 补丁上 `phi` 的总流量（`operation sum`），用于监控流量收敛与工况点；
+- `probes`：流道内多个测点坐标处的 `rho / U / p` 时历。
+
+---
+
+## 12. 参考文献
 
 1. **Thollet, P., et al.** (2016). *Body-force modeling for aerodynamic analysis of air intake – fan interactions.* AIAA Journal.
 
@@ -406,7 +543,7 @@ R,Rho,Trr,Trt,Trz,Ttt,Tzt,Tzz,Z,Lamda
 
 ---
 
-## 12. 致谢
+## 13. 致谢
 
 本项目基于以下开源平台开发：
 - **OpenFOAM v13** — 开源 CFD 平台
@@ -417,7 +554,7 @@ R,Rho,Trr,Trt,Trz,Ttt,Tzt,Tzz,Z,Lamda
 
 ---
 
-## 13. License
+## 14. License
 
 MIT License
 
@@ -443,9 +580,9 @@ SOFTWARE.
 
 ---
 
-## 14. 联系方式
+## 15. 联系方式
 如有问题或建议，请通过705393357@qq.com反馈。
 更新应该不会太更新了，本人拿来跑NASA ROTOR 37特性线误差在5%以内，但是超参数能调的太多，遂放弃，开源。欢迎来讨论。
 
-## 15. 引用
+## 16. 引用
 老师让我整理成论文，非常烦，我应该会丢arXiv上，静候

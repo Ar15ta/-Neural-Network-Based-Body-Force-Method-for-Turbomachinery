@@ -394,7 +394,144 @@ R,Rho,Trr,Trt,Trz,Ttt,Tzt,Tzz,Z,Lamda
 | `openFOAM_Input_Force.csv` | Output of the metal blockage computation program | Training dataset |
 | `optimization_results/best_parameters_separate.txt` | RBF interpolation optimization result | Hyper-parameters for blockage factor computation |
 
-## 11. References
+## 11. Detailed OpenFOAM Case Setup (NASA Rotor 37)
+
+This section documents the complete numerical setup of the NASA Rotor 37 case shipped with the repository, for paper writing and reproducibility. The case runs on **OpenFOAM v13** with the custom solver **ArisaSTALL**, solving the compressible Euler equations with metal blockage correction on a full-annulus clean (blade-free) passage mesh; the body force field is injected as coded source terms via `fvModels`.
+
+### 11.1 Solver features (ArisaSTALL)
+
+ArisaSTALL inherits from OpenFOAM v13's `fluid` base class and is a **compressible Euler solver with metal blockage factor λ correction** (see [ArisaSTALL/Solver_README.md](ArisaSTALL/Solver_README.md) for details). Key features:
+
+- **Purpose-built for the Body Force Method (BFM)**: the mesh is a clean passage without blades; blade effects are represented by (i) body force source terms (momentum/energy) and (ii) the metal blockage factor λ (0 < λ ≤ 1, the circumferential flow-area fraction) as a geometric correction to the equation set.
+- **λ correction throughout the equation set**:
+  - Momentum predictor: `λ·fvm::ddt(ρ,U) + fvm::div(λ_f·φ, U) == -fvc::grad(λ·p) + λ·source`;
+  - Pressure correction (transonic + consistent PIMPLE): the pressure equation contains `ψ·ddt(λ·p)`, `div(λ_f·φHbyA)` and `laplacian(λ·ρ·rAAtU_f, p)`; the velocity correction is `U = HbyA - λ·rAAtU·grad(p)`; the density correction equation also carries λ;
+  - Energy predictor (internal-energy form): `λ·ddt(ρ,h_e) + div(λ_f·φ, h_e) + λ·ddt(ρ,K) + div(λ_f·φ, K)`, with pressure-work term `div(λ_f·φ, p/ρ)`.
+- **Inviscid / no turbulence model**: `momentumTransportPredictor/Corrector` and `thermophysicalTransportPredictor/Corrector` are empty functions; no turbulence transport equations are solved.
+- The λ field is read from `constant/lambda` (`READ_IF_PRESENT`); if absent it falls back to the `lambdaDefault` value in `fvSolution`.
+- The build produces `$FOAM_USER_LIBBIN/libArisaSTALL.so`, loaded by `foamRun` via `solver ArisaSTALL;` in controlDict.
+
+### 11.2 Body force source injection (constant/fvModels)
+
+Two `coded` source terms, both applied only to `cellZone ROTOR_FLUID` (the rotor blade-row region):
+
+| Source | Equation | Form | Note |
+|--------|----------|------|------|
+| `bodyForceSourceU` | momentum U | `S_U = -ρ·bodyForce·V_cell` | reads `constant/bodyForce` (body force per unit mass, dimAcceleration) |
+| `bodyForceSourceE` | energy e | `S_e = -(ρ·bodyForce·U_blade)·V_cell` | blade power input to the fluid |
+
+In the energy source the rotational speed is **n = 17188.7 rpm** (ω = 2πn/60); the blade velocity takes the circumferential component at the local radius, `U_blade = ω·r·e_θ`, and the body-force power is the inner product of body force and blade velocity.
+
+### 11.3 Time stepping and run control (system/controlDict)
+
+| Parameter | Value | Note |
+|-----------|-------|------|
+| `solver` | `ArisaSTALL` | custom solver |
+| `endTime` | 0.02 s | about 5.7 rotor revolutions (17188.7 rpm ≈ 286.5 Hz) |
+| `deltaT` | 5×10⁻⁶ s | fixed time step |
+| `adjustTimeStep` | `false` | no automatic step adjustment (`maxCo 5.0`, `maxDeltaT 5×10⁻⁵` reserved for adaptive use) |
+| `writeControl` | `adjustableRunTime` | one frame per `writeInterval 1×10⁻⁴ s`; `purgeWrite 6` keeps only the latest 6 frames |
+| `runTimeModifiable` | `true` | dictionaries editable at run time |
+
+> Note: the shipped `system/fvSchemes` sets `ddtSchemes` default to `steadyState` (pseudo-time/steady marching), with the `Euler` scheme commented out. For **unsteady computations, switch the default scheme to `Euler`** (first-order implicit); only then do `deltaT` and `endTime` carry true physical time meaning.
+
+### 11.4 Spatial discretization (system/fvSchemes)
+
+| Category | Setting |
+|----------|---------|
+| Time `ddtSchemes` | `default steadyState` (shipped config; switch to `Euler` for unsteady runs) |
+| Gradient `gradSchemes` | `default Gauss linear` (2nd-order central) |
+| Convection `divSchemes` | `div(phi,U)`, `div(phid,p)`, `div(phi,e)`, `div(phi,(p\|rho))`: `Gauss limitedLinear 0.7`; `div(phi,K)`: `Gauss limitedLinear 1` (2nd-order bounded, limiter coefficient 0.7) |
+| λ-weighted convection | `div((interpolate(lambda)*phi), U/K/e/(p\|rho))`: also `Gauss limitedLinear 0.7` (λ interpolated cell-to-face to weight the flux) |
+| Viscous stress | `div(((rho*nuEff)*dev2(T(grad(U))))) Upwind` (with μ≈0 in the inviscid setup this term contributes nothing) |
+| Laplacian `laplacianSchemes` | `default Gauss linear corrected` (explicit non-orthogonal correction of surface normal gradients) |
+| Surface interpolation `interpolationSchemes` | `default linear` |
+| Surface normal gradient `snGradSchemes` | `default corrected` |
+
+### 11.5 Linear solvers and PIMPLE (system/fvSolution)
+
+**Linear solvers:**
+
+| Field | Solver | Smoother/preconditioner | tolerance | relTol |
+|-------|--------|--------------------------|-----------|--------|
+| `p.*` | GAMG (geometric-algebraic multigrid, `cacheAgglomeration`, `nCellsInCoarsestLevel 20`) | DIC/Gauss-Seidel | 1×10⁻⁶ | 0 |
+| `(U\|e\|h).*`, `rho.*` | smoothSolver | DILU/Gauss-Seidel | 1×10⁻⁶ ~ 1×10⁻⁸ | 0 ~ 0.01 |
+
+**PIMPLE settings:**
+
+| Parameter | Value | Note |
+|-----------|-------|------|
+| `nOuterCorrectors` | 50 | outer correctors (pseudo-time iterations) per time step |
+| `nCorrectors` | 2 | inner pressure correctors |
+| `nNonOrthogonalCorrectors` | 1 | non-orthogonal corrections |
+| `correctMeshPhi` | yes | |
+| `consistent` | yes | consistent PIMPLE formulation (rAAtU coefficients) |
+| `transonic` | yes | transonic mode; pressure equation includes `ψ·ddt(p)` |
+| Inner residual criteria | U/p/e = 1×10⁻⁶ | `residualControl` |
+| Outer corrector criteria | U, p: tolerance 4×10⁻², relTol 0.01 | `outerCorrectorResidualControl` |
+| Relaxation factors | p = 0.4 (`pFinal` = 1.0); equations `".*"` = 0.4 | under-relaxation for steady/pseudo-time marching |
+
+**Field limits (system/fvConstraints):** `limitPressure` (minFactor 0.1, maxFactor 3) and `limitTemperature` (200 K ≤ T ≤ 1000 K), suppressing non-physical oscillations in early iterations.
+
+### 11.6 Turbulence treatment
+
+**Inviscid (Euler) setup** — no turbulence model is used:
+
+- `constant/momentumTransport`: `simulationType laminar;` (turbulence transport switched off within the laminar framework);
+- `constant/physicalProperties`: dynamic viscosity **μ = 1×10⁻¹⁰ Pa·s** (near zero, effectively inviscid);
+- Solid walls use **slip** boundary conditions — no wall friction, no boundary layer resolved.
+
+The body force model itself embeds the dissipation/turning effects of the blade row in the source terms, so no RANS closure is needed.
+
+### 11.7 Working fluid properties (constant/physicalProperties)
+
+Air as a **calorically perfect gas**, using the OpenFOAM thermodynamics template combination `hePsiThermo / pureMixture / const / hConst / perfectGas / specie / sensibleInternalEnergy`:
+
+| Property | Value |
+|----------|-------|
+| Molar mass | 28.9 g/mol |
+| Specific heat Cp | 1005 J/(kg·K) (constant) |
+| Specific heat ratio γ | 1.4 |
+| Formation enthalpy hf | 0 |
+| Dynamic viscosity μ | 1×10⁻¹⁰ Pa·s (inviscid) |
+| Prandtl number Pr | 0.71 |
+
+### 11.8 Boundary conditions (0/ directory)
+
+| Boundary | p | U | T |
+|----------|-----|------|-----|
+| INLET | `totalPressure`, p₀ = 101325 Pa | `pressureInletOutletVelocity` | `totalTemperature`, T₀ = 288.15 K, γ = 1.4 |
+| OUTLET | `fixedMean`, mean static pressure 127892 Pa (back pressure for the operating point) | `pressureInletOutletVelocity` | zeroGradient |
+| Hub/shroud walls (IN/OUT/ROTOR_HUB, _SHROUD) | zeroGradient | **slip** | hub/shroud walls `fixedValue` 288.15 K |
+| Rotor–stator interfaces | cyclic (see 11.9) | cyclic | zeroGradient |
+
+Initial fields: `p = 101325 Pa`, `U = (0 0 120) m/s` (axial), `T = 288.15 K`.
+
+### 11.9 Rotor–stator interface treatment
+
+The mesh is split axially into three regions: inlet, rotor (ROTOR_FLUID), and outlet. The regions are connected via **`nonConformalCyclic` (non-conformal cyclic / non-matching interfaces)**, two pairs in total:
+
+- `nonConformalCyclic_on_ROTOR_TO_IN` ↔ `nonConformalCyclic_on_IN_TO_ROTOR` (rotor–inlet);
+- `nonConformalCyclic_on_ROTOR_TO_OUT` ↔ `nonConformalCyclic_on_OUT_TO_ROTOR` (rotor–outlet).
+
+Settings: `matchTolerance 0.0001`, `transformType none` (identical coordinates on both sides, no transformation), with a companion `nonConformalError` patch for diagnosing unmatched area. The interface allows non-matching nodes on the two sides; fluxes are transferred via face-weighted interpolation, which suits the BFM workflow of meshing each blade row independently and then stitching. Since all blade effects are represented by the body force and λ, both sides of the interface are solved in the same absolute frame — **no MRF/AMI rotating reference frame is used**.
+
+### 11.10 Mesh, zones, and parallelization
+
+- **Mesh**: full-annulus 3D clean-passage hexahedral mesh, **322,848 cells**;
+- **cellZones**: three regions — `ROTOR_FLUID` (body force region), `IN_FLUID`, `OUT_FLUID`;
+- **Blockage field**: `constant/lambda` is a non-uniform volScalarField with 322,848 cell values;
+- **Parallel**: `system/decomposeParDict` uses the **scotch** method for automatic partitioning, **8 cores**; the script `For_Nasa_Rotor_37_Body_Force.sh` runs `decomposePar -constant`, `decomposePar -fields`, then `mpirun -np 8 foamRun -parallel`.
+
+### 11.11 Run-time monitoring (system/functions)
+
+- `residuals`: field residual output;
+- `patchFlowRate`: total `phi` flux through the OUTLET patch (`operation sum`), used to monitor mass-flow convergence and the operating point;
+- `probes`: time histories of `rho / U / p` at several probe locations in the passage.
+
+---
+
+## 12. References
 
 1. **Thollet, P., et al.** (2016). *Body-force modeling for aerodynamic analysis of air intake – fan interactions.* AIAA Journal.
 
@@ -404,7 +541,7 @@ R,Rho,Trr,Trt,Trz,Ttt,Tzt,Tzz,Z,Lamda
 
 ---
 
-## 12. Acknowledgements
+## 13. Acknowledgements
 
 This project is built on the following open-source platforms:
 - **OpenFOAM v13** — open-source CFD platform.
@@ -415,7 +552,7 @@ Thanks to the OpenFOAM Foundation and the PyTorch team for their excellent open-
 
 ---
 
-## 13. License
+## 14. License
 
 MIT License
 
@@ -441,9 +578,9 @@ SOFTWARE.
 
 ---
 
-## 14. Contact
+## 15. Contact
 For questions or suggestions, please contact 705393357@qq.com.
 There probably won't be many further updates. For the NASA ROTOR 37 characteristic line the error is within 5%, but there are too many tunable hyper-parameters, so I gave up and open-sourced it. Discussions are welcome.
 
-## 15. Citation
+## 16. Citation
 My advisor asked me to write it up as a paper, which is annoying. I'll probably put it on arXiv — stay tuned.
