@@ -19,10 +19,19 @@ constant/fvMesh/
 
 # Python 训练过程中的临时检查点
 ANN_Output/model_best.pt
+__pycache__/
+*.py[cod]
+*_bak.csv
+post_outputs/
+*.msh
 log.*
 *.log
 foam.log
 core
+
+# 本地研究与调试归档，不随示例仓库发布
+local_archive/
+pressure_experiment/
 
 # 忽略时间步目录但保留初始场
 /[1-9]*

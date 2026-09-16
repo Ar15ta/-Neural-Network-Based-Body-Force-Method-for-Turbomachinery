@@ -1,586 +1,111 @@
-# Neural Network-Based Body Force Method for Turbomachinery
+# Neural-Network-Based Body-Force Method for Turbomachinery
 
-[中文文档](README.md) | **English**
+[中文](README.md)
 
----
-<img width="2882" height="2603" alt="BFM_Procedure" src="https://github.com/user-attachments/assets/27d04fa3-2a7b-4362-a516-f9874742e8ee" />
+This repository is a research prototype for reconstructing turbomachinery body-force fields from pitchwise-averaged single-passage CFD data. A neural network represents a continuous momentum-flux field, automatic differentiation evaluates its spatial derivatives, and an OpenFOAM source term applies the reconstructed force. A NASA Rotor 37 case for OpenFOAM v13 is included.
 
-<img width="3663" height="2316" alt="BFM_MESH" src="https://github.com/user-attachments/assets/2aa1b2cb-21f7-413f-94b0-289c3b238e74" />
+> Status: the code is a starting point for single-operating-point reconstruction and numerical experiments. It is not a generally validated compressor model. Off-design, near-stall, and distorted-inflow applications require additional calibration and validation.
 
+## Pipeline
 
-
-
-## 1. Introduction
-
-This project proposes a **brand-new body force computation pipeline**, introducing — for the first time — neural networks and automatic differentiation into the field of turbomachinery body force modeling. It is validated on the NASA Rotor 37 case. The NASA Rotor 37 data used here come from https://github.com/Yashay03/Axial-Compressor-Rotor-37
-
-**Using an AI assistant to set up the environment, run, and understand this project is highly recommended!!!**
-
-**Core idea**:
-1. Extract meridional-plane flux data from a steady single-passage CFX computation.
-2. Use a neural network to fit the λ (metal blockage coefficient) × flux ($\rho UU$) field, obtaining a continuously differentiable expression.
-3. Compute derivatives via automatic differentiation and substitute them into the momentum equation to recover the body force distribution.
-4. Inject the body force into a full-annulus OpenFOAM mesh and run an unsteady 3D computation on a clean (blade-free) flow passage.
-
----
-
-## 2. Background
-
-### 2.1 Limitations of traditional methods
-
-| Method | Pros | Cons |
-|--------|------|------|
-| **Full 3D CFD** | High accuracy, captures details | Extremely expensive; hard to run multi-condition / unsteady analyses |
-| **Low-order models** | Very fast | Cannot capture 3D stall phenomena |
-
-### 2.2 Position of this method
-
-The **Body Force Method (BFM)** is a compromise between the two:
-- Uses a low-order model (single-passage CFD) to generate the body force source terms.
-- Runs full-annulus unsteady computations in a clean 3D passage.
-- Balances computational efficiency with the ability to capture 3D flow.
-- It can be used for coarse unsteady computations at any stable operating point. To improve reliability near stall or across operating conditions, you **must** extract body forces from multiple conditions yourself and build an online lookup table.
-
----
-
-## 3. Project structure
-
-The project contains two core modules:
-
-```
-Arisa_Benneke_Method/
-│
-├── Bodyforce_Method/                 # Body force generation module
-│   ├── NASA_ROTOR_37/                # NASA ROTOR 37 example case
-│   │   ├── ANN_TrainOneMLP.py       # Python neural network training script
-│   │   ├── ANN_Pre_Processing.C      # C++ neural network inference (LibTorch)
-│   │   ├── Benneke_Pre_Processing.C  # Traditional IDW interpolation (reference)
-│   │   ├── BodyForceVisualizer.py    # Body force visualization tool
-│   │   │
-│   │   ├── optimization_results/     # RBF interpolation hyper-parameters (meridional blockage factor)
-│   │   │   └── best_parameters_separate.txt
-│   │   │
-│   │   ├── ANN_Output/               # Training outputs
-│   │   │   ├── flux_mlp_traced.pt    # TorchScript model (loaded by ANN_Pre_Processing)
-│   │   │   ├── flux_mlp_best.pt      # Best checkpoint
-│   │   │   └── normalization_params.csv
-│   │   │
-│   │   ├── CFX_Output_Benneke_Flux.csv  # Flux data exported from CFX
-│   │   ├── constant/                 # OpenFOAM mesh and physical properties
-│   │   └── system/                   # Solver configuration
-│   │
-│   └── Initializer/                  # Full-annulus initialization case
-│
-├── ArisaSTALL/                       # 3D full-annulus Euler solver
-│   ├── ArisaSTALL.C                  # Main solver
-│   ├── ArisaSTALL.H                  # Header
-│   ├── momentumPredictor.C           # Momentum predictor
-│   ├── thermophysicalPredictor.C     # Energy predictor
-│   ├── correctPressure.C             # Pressure correction
-│   ├── Make/                         # Build configuration
-│   └── Solver_README.md              # Detailed solver documentation
-│
-└── README.md                         # This file
+```text
+(r, z, rho, lambda, Trr, Trt, Trz, Ttt, Tzt, Tzz)
+        -> neural flux reconstruction
+        -> automatic differentiation
+        -> (fr, ftheta, fz)
+        -> OpenFOAM fvModels source
 ```
 
----
+The cylindrical conservative relation used by the reconstruction is
 
-## 4. Key innovations
+$$
+\lambda\rho\mathbf f=
+\frac{1}{r}\frac{\partial(\lambda r\mathbf T_r)}{\partial r}
++\frac{\partial(\lambda\mathbf T_z)}{\partial z}
+-\frac{\lambda\mathbf T_\theta}{r}.
+$$
 
-### 4.1 First use of neural networks + automatic differentiation
+The network fits $\lambda\mathbf T$ directly so that its derivatives can be evaluated by automatic differentiation. MLS and RBF/IDW implementations are retained for comparison.
 
-Traditional body force methods (e.g. the Benneke method) use **IDW interpolation** or **polynomial fitting** to process discrete flux data, which has the following problems:
-- Interpolation results are not smooth; derivative computation has large errors.
-- Requires manual tuning; poor generalization.
-- Integration methods need meridional mesh information; weak portability.
+## Main files
 
-**Advantages of this method**:
-- Neural networks naturally provide **smooth, differentiable** fits.
-- Automatic differentiation computes derivatives **exactly**, with no manual derivation.
-- Supports **arbitrary turbomachinery**.
-
-### 4.2 Network design: directly learning λ×flux
-Only scatter data of the fluxes is needed (meridional coordinates + 6 flux values + metal blockage distribution + density).
-
-The network outputs **λ×flux** (rather than λ and flux separately), avoiding a multiplication at inference time and reducing error accumulation:
-
-```
-Network output: [ρ, λ·Trr, λ·Trt, λ·Trz, λ·Ttt, λ·Tzt, λ·Tzz, λ]
-         ↓ automatic differentiation
-Body force:    [f_r, f_θ, f_z]
+```text
+ANN_TrainOneMLP.py          flux-network training
+ANN_Pre_Processing.C       LibTorch inference and automatic differentiation
+MLS_Pre_Processing.C       moving-least-squares reconstruction
+Benneke_Pre_Processing.C   RBF/IDW reconstruction
+calculateBlockage.C        lambda field and training-data generation
+ArisaSTALL/                OpenFOAM v13 blockage-aware Euler solver
+0/, constant/, system/     runnable Rotor 37 example
+ANN_Output/                example network and normalization parameters
 ```
 
-### 4.3 Batch inference
+The example input is based on [Yashay03/Axial-Compressor-Rotor-37](https://github.com/Yashay03/Axial-Compressor-Rotor-37).
 
-The C++ inference uses **batch matrix operations**, processing all mesh cells at once to produce the body force field for the operating condition, which is then invoked at runtime by OpenFOAM's fvModels.
+## Requirements
 
-### 4.4 Euler solver with metal blockage correction
+- OpenFOAM v13
+- Python 3.8+
+- PyTorch, NumPy, and Pandas
+- LibTorch matching the installed PyTorch version
 
-The accompanying compressible **Euler** solver **ArisaSTALL** inherits from OpenFOAM v13's `fluid` solver and supports:
-- Momentum/energy equation correction with the blockage factor λ.
-- 3D full-annulus unsteady computation.
-- Seamless coupling with the neural-network body force.
+Update the LibTorch paths in `make/options` for your installation.
 
----
+## Minimal run
 
-## 5. Limitations
-
-- Accuracy depends on the **quality of the single-passage CFD**.
-- The full-annulus mesh distribution must be **spatially consistent** with the single-passage data.
-- Training parameters (network structure, learning rate, etc.) require **tuning**.
-
----
-
-## 6. Mathematical principles
-
-### 6.1 Body force equation
-
-Starting from the momentum equation, the body force is defined as:
-
-$$
-\lambda \rho \mathbf{f} = \frac{1}{r} \frac{\partial (\lambda r \mathbf{T}_r)}{\partial r} + \frac{\partial (\lambda \mathbf{T}_z)}{\partial z} - \frac{\lambda \mathbf{T}_\theta}{r}
-$$
-
-where $\mathbf{T}$ is the flux tensor:
-
-$$
-\mathbf{T} = \begin{bmatrix} T_{rr} & T_{r\theta} & T_{rz} \\ T_{\theta r} & T_{\theta\theta} & T_{\theta z} \\ T_{zr} & T_{z\theta} & T_{zz} \end{bmatrix}
-$$
-
-Components:
-- $T_{rr} = \rho V_r^2 + p$
-- $T_{r\theta} = \rho V_r V_\theta$
-- $T_{rz} = \rho V_r V_z$
-- $T_{\theta\theta} = \rho V_\theta^2 + p$
-- $T_{\theta z} = \rho V_\theta V_z$
-- $T_{zz} = \rho V_z^2 + p$
-
-### 6.2 Automatic differentiation chain rule
-
-The network takes normalized coordinates $(r_{norm}, z_{norm})$; physical derivatives are:
-
-$$
-\frac{\partial}{\partial r_{phys}} = \frac{\partial}{\partial r_{norm}} \cdot \frac{1}{r_{max} - r_{min}}
-$$
-
-$$
-\frac{\partial}{\partial z_{phys}} = \frac{\partial}{\partial z_{norm}} \cdot \frac{1}{z_{max} - z_{min}}
-$$
-
-### 6.3 Blockage factor correction
-
-The blockage factor λ denotes the fluid volume fraction (0 < λ ≤ 1), used to model the effect of metal blades on the flow.
-
-$\lambda$ is defined as $N\frac{\theta_{PS}-\theta_{SS}}{2\pi}$, where $N$ is the number of blades and $\theta$ is the circumferential coordinate of the blade at a given $r$, $z$ (the pressure side and suction side of two adjacent blades, respectively).
-
-The corrected momentum equation:
-
-$$
-\frac{\partial (\lambda \rho \mathbf{U})}{\partial t} + \nabla \cdot (\lambda \rho \mathbf{U} \mathbf{U}) = -\nabla (\lambda p) + \lambda \rho \mathbf{g} + \lambda \mathbf{f}
-$$
-
-The corrected energy equation:
-
-$$
-\frac{\partial (\lambda \rho e)}{\partial t} + \nabla \cdot (\lambda \rho e \mathbf{U}) = -\nabla \cdot (\lambda p \mathbf{U}) + \lambda S_e
-$$
-
----
-
-## 7. Workflow
-
-> It is recommended to run the C++ tools in a Linux virtual machine (OpenFOAM v13) sharing a folder with the host, and to run the Python training script on the host.
->
-> **This repository ships with a coarse-mesh NASA Rotor 37 case (`constant/polyMesh`, `0/`, etc.), including a trained network and the body force field. You can run it directly with `foamRun` in Step 7.** To model your own turbomachine, start from Step 1.
-
-### Step 0: Prepare the mesh
-
-1. Build a **clean full-annulus passage mesh** (blades are not part of the geometry; they are represented by the body force + blockage factor).
-2. Import it into the case folder (`constant/polyMesh`). **This repository already ships the converted `constant/polyMesh`**, so no mesh file is needed to run; for your own mesh, use `gmshToFoam` / `fluentMeshToFoam` to convert a `.msh`/`.cas` file into `constant/polyMesh`.
-3. **Make sure to glue the interfaces**: use `mergePairs` / `stitchMesh`, or glue the partitioned regions into a contiguous mesh during import, and use `createPatch` to set up the inlet, outlet, and wall boundaries.
-4. Define the `ROTOR_FLUID` cellZone — the body force acts only on this region.
-
-### Step 1: Export meridional data from single-passage CFD
-
-Export the following meridional (circumferentially averaged) data from a steady single-passage CFD run (e.g. CFX):
-
-- Blade surface (pressure side / suction side) coordinates → `CFX_Output_Blockage.csv` (used to compute the meridional distribution of the blockage factor λ).
-- Meridional coordinates (R, Z), density ρ, flux components Trr/Trt/Trz/Ttt/Tzt/Tzz, blockage factor λ → `CFX_Output_Benneke_Flux.csv`.
-
-### Step 2: Compile the ArisaSTALL solver
-
-`ArisaSTALL` is a compressible Euler solver inheriting from OpenFOAM v13's `fluid` solver. After `wmake` it produces `libArisaSTALL.so`, loaded by `foamRun` via `solver ArisaSTALL;` in controlDict.
+The repository includes a mesh, initial fields, `constant/bodyForce`, and `constant/lambda`:
 
 ```bash
+source /opt/openfoam13/etc/bashrc
+
 cd ArisaSTALL
-wmake          # requires OpenFOAM v13
+wmake
 cd ..
-```
 
-### Step 3: Compile the pre-processing tools
-
-The body force field can be generated by three methods, each a single-`.C`-file tool compiled with `wmake` in the case folder (they share one `Make/files` and `Make/options`):
-
-| Tool | Method | Dependency |
-|------|--------|------------|
-| `ANN_Pre_Processing.C` | Neural network + automatic differentiation (**recommended, the project's main method**) | LibTorch |
-| `MLS_Pre_Processing.C` | Moving Least Squares local weighted polynomial fit | none |
-| `Benneke_Pre_Processing.C` | Traditional RBF/IDW interpolation (reference comparison) | none |
-| `calculateBlockage.C` | Blockage factor λ and training data generation | none |
-
-`wmake` can only build one executable at a time: open `Make/files`, uncomment the `SOURCE += xxx.C` / `EXE = ...` pair for the tool you want (comment the others), then run `wmake`. The repository's `make/files` already contains all configurations and activates `MLS_Pre_Processing.C` by default.
-
-> Note: the repository folder is named lowercase `make`, while OpenFOAM reads `Make/files` by default; if `wmake` cannot find the files, rename the folder to `Make` (`mv make Make`) before compiling.
-
-```bash
-# e.g. build the neural network tool (activate the ANN_Pre_Processing.C pair in Make/files)
-wmake
-# e.g. build the Moving Least Squares tool (activate the MLS_Pre_Processing.C pair in Make/files)
-wmake
-# e.g. build the blockage factor tool (activate the calculateBlockage.C pair in Make/files)
-wmake
-```
-
-> Note: the LibTorch path in `Make/options` (e.g. `/home/dyfluid/libtorch`) must be changed to your own path. Only `ANN_Pre_Processing` depends on LibTorch; `MLS_Pre_Processing`, `Benneke_Pre_Processing`, and `calculateBlockage` do not.
-
-### Step 4: Compute the blockage factor and generate training data
-
-```bash
-# Reads CFX_Output_Blockage.csv and CFX_Output_Benneke_Flux.csv
-# Outputs constant/lambda (blockage factor field) and openFOAM_Input_Force.csv (training data with a λ column)
-calculateBlockage
-```
-
-### Step 5: Train the neural network (in Python on the host)
-
-```bash
-# Reads openFOAM_Input_Force.csv, outputs to ANN_Output/
-python ANN_TrainOneMLP.py
-```
-
-**Output files** (`ANN_Output/`):
-- `flux_mlp_traced.pt` — TorchScript model (loaded directly by C++ LibTorch).
-- `flux_mlp_best.pt` — best checkpoint.
-- `normalization_params.csv` — normalization parameters.
-
-### Step 6: Run inference to generate the body force field
-
-```bash
-# Loads ANN_Output/flux_mlp_traced.pt and runs batch automatic-differentiation inference on the ROTOR_FLUID mesh
-ANN_Pre_Processing
-```
-
-**Output files**:
-- `constant/bodyForce` — body force vector field (force per unit mass, dimAcceleration).
-- `constant/lambda` — blockage factor scalar field (generated in Step 4).
-
-> Without using the neural network, two traditional interpolation methods can replace Steps 5/6 and directly produce `constant/bodyForce` (both read `openFOAM_Input_Force.csv`; no training, no LibTorch):
-> - **Moving Least Squares (MLS)**: `MLS_Pre_Processing`, a Gaussian-weighted local polynomial fit in the neighborhood whose coefficients directly give a smooth value and analytical gradient.
-> - **RBF/IDW (Benneke method)**: `Benneke_Pre_Processing`, requires you to supply `optimization_results/best_flux_parameters.txt` hyper-parameters.
-
-### Step 7: Full-annulus unsteady computation
-
-Make sure `constant/bodyForce` and `constant/lambda` are in place. `constant/fvModels` directly reads the `bodyForce` field and injects the momentum source `rho*bodyForce` and the blade power `(rho*bodyForce)·U_blade` into the solver. Then:
-
-```bash
-# Serial
 foamRun
-
-# Or parallel (see For_Nasa_Rotor_37_Body_Force.sh, which includes decomposePar + mpirun foamRun -parallel)
-./For_Nasa_Rotor_37_Body_Force.sh
 ```
 
----
-## 8. Dependencies
+`system/controlDict` loads `libArisaSTALL.so`. Start with a short serial run and verify mass flow, continuity errors, and finite field values.
 
-| Software | Version |
-|----------|---------|
-| **OpenFOAM** | v13 or later |
-| **Python** | 3.8+ |
-| **PyTorch** | 1.10+ |
-| **LibTorch** | matching the PyTorch version |
-| **NumPy** | 1.20+ |
-| **Pandas** | 1.3+ |
-| **Matplotlib** | 3.4+ |
+## Rebuilding the body-force field
 
-### 8.1 Installing LibTorch
+1. Prepare `CFX_Output_Blockage.csv` from the blade surfaces and `CFX_Output_Benneke_Flux.csv` from pitchwise-averaged meridional fluxes.
+2. Enable only `calculateBlockage.C` in `make/files`, compile it, and run `calculateBlockage`.
+3. Run `python ANN_TrainOneMLP.py`.
+4. Enable only `ANN_Pre_Processing.C` in `make/files`, compile it, and run `ANN_Pre_Processing`.
+5. Inspect `constant/lambda` and `constant/bodyForce`, then run `foamRun`.
 
-```bash
-# Download LibTorch (CPU version)
-wget https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-1.10.0%2Bcpu.zip
-unzip libtorch-shared-with-deps-1.10.0+cpu.zip
+Use `wmake make` with the current lowercase directory, or rename it to the conventional `Make/` and run `wmake`.
 
-# Set the environment variable
-export LibTorch_DIR=/path/to/libtorch
-```
-
-### 8.2 OpenFOAM build configuration
-
-Add the following to `Make/options`:
-
-```makefile
-EXE_INC = \
-    -I$(LIBTORCH_DIR)/include \
-    -I$(LIBTORCH_DIR)/include/torch/csrc/api/include
-
-EXE_LIBS = \
-    -L$(LIBTORCH_DIR)/lib \
-    -ltorch \
-    -ltorch_cpu \
-    -lc10
-```
-
----
-
-## 9. Neural network architecture
-
-### 9.1 Random Fourier Features (RFF)
-
-Maps low-dimensional coordinates into a high-dimensional feature space to improve the capture of high-frequency information:
-
-$$
-\gamma(\mathbf{x}) = [\sin(\mathbf{B}\mathbf{x}), \cos(\mathbf{B}\mathbf{x})]
-$$
-
-where $\mathbf{B}$ is a random projection matrix, fixed and not trained.
-
-### 9.2 FluxMLP structure
-
-```
-Input: (r_norm, z_norm)  [2D]
-   ↓
-RFF Layer: sin/cos mapping  [128D]
-   ↓
-Hidden Layer 1: Linear + SiLU  [64D]
-Hidden Layer 2: Linear + SiLU  [64D]
-Hidden Layer 3: Linear + SiLU  [64D]
-Hidden Layer 4: Linear + SiLU  [64D]
-   ↓
-Output Layer: Linear  [8D]
-   ↓
-Output: [ρ, λ·Trr, λ·Trt, λ·Trz, λ·Ttt, λ·Tzt, λ·Tzz, λ]
-```
-
-### 9.3 Training parameters
-
-| Parameter | Default |
-|-----------|---------|
-| hidden_layers | 4 |
-| hidden_dim | 64 |
-| rff_dim | 128 |
-| rff_sigma | 1.0 |
-| epochs | 50000 |
-| learning_rate | 1e-3 |
-| weight_decay | 1e-3 |
-
-
-
-## 10. Data files
-
-### 10.1 Input data format (CSV)
+Minimum flux CSV header:
 
 ```csv
 R,Rho,Trr,Trt,Trz,Ttt,Tzt,Tzz,Z,Lamda
-0.1234,1.225,101325.0,0.0,0.0,101325.0,0.0,101325.0,0.0567,0.95
-...
 ```
 
-**Data file descriptions**:
+`Lamda` is a historical spelling retained for compatibility.
 
-| File | Source | Purpose |
-|------|--------|---------|
-| `CFX_Output_Blockage.csv` | CFD blade surface (PS/SS) coordinate extraction | Compute meridional blockage factor distribution |
-| `CFX_Output_Benneke_Flux.csv` | CFX circumferentially averaged fluxes | Neural network training input (blade-averaged fluxes) |
-| `openFOAM_Input_Force.csv` | Output of the metal blockage computation program | Training dataset |
-| `optimization_results/best_parameters_separate.txt` | RBF interpolation optimization result | Hyper-parameters for blockage factor computation |
+## Known limitations
 
-## 11. Detailed OpenFOAM Case Setup (NASA Rotor 37)
+- A force reconstructed from one CFD operating point is not, by itself, an off-design predictive model.
+- Results are sensitive to training hyperparameters, extrapolation, blockage definitions, and source discretization.
+- Stall inception, inlet distortion, and cross-configuration generalization are not validated.
+- Several paths, zone names, and assumptions remain Rotor-37-specific.
+- Bundled models and fields demonstrate the workflow and are not reference-quality benchmark data.
 
-This section documents the complete numerical setup of the NASA Rotor 37 case shipped with the repository, for paper writing and reproducibility. The case runs on **OpenFOAM v13** with the custom solver **ArisaSTALL**, solving the compressible Euler equations with metal blockage correction on a full-annulus clean (blade-free) passage mesh; the body force field is injected as coded source terms via `fvModels`.
+## Contributing
 
-### 11.1 Solver features (ArisaSTALL)
+Useful contributions include:
 
-ArisaSTALL inherits from OpenFOAM v13's `fluid` base class and is a **compressible Euler solver with metal blockage factor λ correction** (see [ArisaSTALL/Solver_README.md](ArisaSTALL/Solver_README.md) for details). Key features:
+- reproducible build scripts and a minimal regression test;
+- removal of hard-coded paths and consistent `Make/` layouts;
+- validation of input columns, units, zones, and NaN/Inf values;
+- integrated force, torque, and axial-load closure tests;
+- multi-operating-point calibration and leave-one-point-out evaluation;
+- a smaller, clearly licensed public test dataset.
 
-- **Purpose-built for the Body Force Method (BFM)**: the mesh is a clean passage without blades; blade effects are represented by (i) body force source terms (momentum/energy) and (ii) the metal blockage factor λ (0 < λ ≤ 1, the circumferential flow-area fraction) as a geometric correction to the equation set.
-- **λ correction throughout the equation set**:
-  - Momentum predictor: `λ·fvm::ddt(ρ,U) + fvm::div(λ_f·φ, U) == -fvc::grad(λ·p) + λ·source`;
-  - Pressure correction (transonic + consistent PIMPLE): the pressure equation contains `ψ·ddt(λ·p)`, `div(λ_f·φHbyA)` and `laplacian(λ·ρ·rAAtU_f, p)`; the velocity correction is `U = HbyA - λ·rAAtU·grad(p)`; the density correction equation also carries λ;
-  - Energy predictor (internal-energy form): `λ·ddt(ρ,h_e) + div(λ_f·φ, h_e) + λ·ddt(ρ,K) + div(λ_f·φ, K)`, with pressure-work term `div(λ_f·φ, p/ρ)`.
-- **Inviscid / no turbulence model**: `momentumTransportPredictor/Corrector` and `thermophysicalTransportPredictor/Corrector` are empty functions; no turbulence transport equations are solved.
-- The λ field is read from `constant/lambda` (`READ_IF_PRESENT`); if absent it falls back to the `lambdaDefault` value in `fvSolution`.
-- The build produces `$FOAM_USER_LIBBIN/libArisaSTALL.so`, loaded by `foamRun` via `solver ArisaSTALL;` in controlDict.
+When opening an issue, include OpenFOAM/PyTorch/LibTorch versions, the exact command, the input header, and the shortest relevant log. Do not upload full time directories.
 
-### 11.2 Body force source injection (constant/fvModels)
+## Licensing note
 
-Two `coded` source terms, both applied only to `cellZone ROTOR_FLUID` (the rotor blade-row region):
-
-| Source | Equation | Form | Note |
-|--------|----------|------|------|
-| `bodyForceSourceU` | momentum U | `S_U = -ρ·bodyForce·V_cell` | reads `constant/bodyForce` (body force per unit mass, dimAcceleration) |
-| `bodyForceSourceE` | energy e | `S_e = -(ρ·bodyForce·U_blade)·V_cell` | blade power input to the fluid |
-
-In the energy source the rotational speed is **n = 17188.7 rpm** (ω = 2πn/60); the blade velocity takes the circumferential component at the local radius, `U_blade = ω·r·e_θ`, and the body-force power is the inner product of body force and blade velocity.
-
-### 11.3 Time stepping and run control (system/controlDict)
-
-| Parameter | Value | Note |
-|-----------|-------|------|
-| `solver` | `ArisaSTALL` | custom solver |
-| `endTime` | 0.02 s | about 5.7 rotor revolutions (17188.7 rpm ≈ 286.5 Hz) |
-| `deltaT` | 5×10⁻⁶ s | fixed time step |
-| `adjustTimeStep` | `false` | no automatic step adjustment (`maxCo 5.0`, `maxDeltaT 5×10⁻⁵` reserved for adaptive use) |
-| `writeControl` | `adjustableRunTime` | one frame per `writeInterval 1×10⁻⁴ s`; `purgeWrite 6` keeps only the latest 6 frames |
-| `runTimeModifiable` | `true` | dictionaries editable at run time |
-
-> Note: the shipped `system/fvSchemes` sets `ddtSchemes` default to `steadyState` (pseudo-time/steady marching), with the `Euler` scheme commented out. For **unsteady computations, switch the default scheme to `Euler`** (first-order implicit); only then do `deltaT` and `endTime` carry true physical time meaning.
-
-### 11.4 Spatial discretization (system/fvSchemes)
-
-| Category | Setting |
-|----------|---------|
-| Time `ddtSchemes` | `default steadyState` (shipped config; switch to `Euler` for unsteady runs) |
-| Gradient `gradSchemes` | `default Gauss linear` (2nd-order central) |
-| Convection `divSchemes` | `div(phi,U)`, `div(phid,p)`, `div(phi,e)`, `div(phi,(p\|rho))`: `Gauss limitedLinear 0.7`; `div(phi,K)`: `Gauss limitedLinear 1` (2nd-order bounded, limiter coefficient 0.7) |
-| λ-weighted convection | `div((interpolate(lambda)*phi), U/K/e/(p\|rho))`: also `Gauss limitedLinear 0.7` (λ interpolated cell-to-face to weight the flux) |
-| Viscous stress | `div(((rho*nuEff)*dev2(T(grad(U))))) Upwind` (with μ≈0 in the inviscid setup this term contributes nothing) |
-| Laplacian `laplacianSchemes` | `default Gauss linear corrected` (explicit non-orthogonal correction of surface normal gradients) |
-| Surface interpolation `interpolationSchemes` | `default linear` |
-| Surface normal gradient `snGradSchemes` | `default corrected` |
-
-### 11.5 Linear solvers and PIMPLE (system/fvSolution)
-
-**Linear solvers:**
-
-| Field | Solver | Smoother/preconditioner | tolerance | relTol |
-|-------|--------|--------------------------|-----------|--------|
-| `p.*` | GAMG (geometric-algebraic multigrid, `cacheAgglomeration`, `nCellsInCoarsestLevel 20`) | DIC/Gauss-Seidel | 1×10⁻⁶ | 0 |
-| `(U\|e\|h).*`, `rho.*` | smoothSolver | DILU/Gauss-Seidel | 1×10⁻⁶ ~ 1×10⁻⁸ | 0 ~ 0.01 |
-
-**PIMPLE settings:**
-
-| Parameter | Value | Note |
-|-----------|-------|------|
-| `nOuterCorrectors` | 50 | outer correctors (pseudo-time iterations) per time step |
-| `nCorrectors` | 2 | inner pressure correctors |
-| `nNonOrthogonalCorrectors` | 1 | non-orthogonal corrections |
-| `correctMeshPhi` | yes | |
-| `consistent` | yes | consistent PIMPLE formulation (rAAtU coefficients) |
-| `transonic` | yes | transonic mode; pressure equation includes `ψ·ddt(p)` |
-| Inner residual criteria | U/p/e = 1×10⁻⁶ | `residualControl` |
-| Outer corrector criteria | U, p: tolerance 4×10⁻², relTol 0.01 | `outerCorrectorResidualControl` |
-| Relaxation factors | p = 0.4 (`pFinal` = 1.0); equations `".*"` = 0.4 | under-relaxation for steady/pseudo-time marching |
-
-**Field limits (system/fvConstraints):** `limitPressure` (minFactor 0.1, maxFactor 3) and `limitTemperature` (200 K ≤ T ≤ 1000 K), suppressing non-physical oscillations in early iterations.
-
-### 11.6 Turbulence treatment
-
-**Inviscid (Euler) setup** — no turbulence model is used:
-
-- `constant/momentumTransport`: `simulationType laminar;` (turbulence transport switched off within the laminar framework);
-- `constant/physicalProperties`: dynamic viscosity **μ = 1×10⁻¹⁰ Pa·s** (near zero, effectively inviscid);
-- Solid walls use **slip** boundary conditions — no wall friction, no boundary layer resolved.
-
-The body force model itself embeds the dissipation/turning effects of the blade row in the source terms, so no RANS closure is needed.
-
-### 11.7 Working fluid properties (constant/physicalProperties)
-
-Air as a **calorically perfect gas**, using the OpenFOAM thermodynamics template combination `hePsiThermo / pureMixture / const / hConst / perfectGas / specie / sensibleInternalEnergy`:
-
-| Property | Value |
-|----------|-------|
-| Molar mass | 28.9 g/mol |
-| Specific heat Cp | 1005 J/(kg·K) (constant) |
-| Specific heat ratio γ | 1.4 |
-| Formation enthalpy hf | 0 |
-| Dynamic viscosity μ | 1×10⁻¹⁰ Pa·s (inviscid) |
-| Prandtl number Pr | 0.71 |
-
-### 11.8 Boundary conditions (0/ directory)
-
-| Boundary | p | U | T |
-|----------|-----|------|-----|
-| INLET | `totalPressure`, p₀ = 101325 Pa | `pressureInletOutletVelocity` | `totalTemperature`, T₀ = 288.15 K, γ = 1.4 |
-| OUTLET | `fixedMean`, mean static pressure 127892 Pa (back pressure for the operating point) | `pressureInletOutletVelocity` | zeroGradient |
-| Hub/shroud walls (IN/OUT/ROTOR_HUB, _SHROUD) | zeroGradient | **slip** | hub/shroud walls `fixedValue` 288.15 K |
-| Rotor–stator interfaces | cyclic (see 11.9) | cyclic | zeroGradient |
-
-Initial fields: `p = 101325 Pa`, `U = (0 0 120) m/s` (axial), `T = 288.15 K`.
-
-### 11.9 Rotor–stator interface treatment
-
-The mesh is split axially into three regions: inlet, rotor (ROTOR_FLUID), and outlet. The regions are connected via **`nonConformalCyclic` (non-conformal cyclic / non-matching interfaces)**, two pairs in total:
-
-- `nonConformalCyclic_on_ROTOR_TO_IN` ↔ `nonConformalCyclic_on_IN_TO_ROTOR` (rotor–inlet);
-- `nonConformalCyclic_on_ROTOR_TO_OUT` ↔ `nonConformalCyclic_on_OUT_TO_ROTOR` (rotor–outlet).
-
-Settings: `matchTolerance 0.0001`, `transformType none` (identical coordinates on both sides, no transformation), with a companion `nonConformalError` patch for diagnosing unmatched area. The interface allows non-matching nodes on the two sides; fluxes are transferred via face-weighted interpolation, which suits the BFM workflow of meshing each blade row independently and then stitching. Since all blade effects are represented by the body force and λ, both sides of the interface are solved in the same absolute frame — **no MRF/AMI rotating reference frame is used**.
-
-### 11.10 Mesh, zones, and parallelization
-
-- **Mesh**: full-annulus 3D clean-passage hexahedral mesh, **322,848 cells**;
-- **cellZones**: three regions — `ROTOR_FLUID` (body force region), `IN_FLUID`, `OUT_FLUID`;
-- **Blockage field**: `constant/lambda` is a non-uniform volScalarField with 322,848 cell values;
-- **Parallel**: `system/decomposeParDict` uses the **scotch** method for automatic partitioning, **8 cores**; the script `For_Nasa_Rotor_37_Body_Force.sh` runs `decomposePar -constant`, `decomposePar -fields`, then `mpirun -np 8 foamRun -parallel`.
-
-### 11.11 Run-time monitoring (system/functions)
-
-- `residuals`: field residual output;
-- `patchFlowRate`: total `phi` flux through the OUTLET patch (`operation sum`), used to monitor mass-flow convergence and the operating point;
-- `probes`: time histories of `rho / U / p` at several probe locations in the passage.
-
----
-
-## 12. References
-
-1. **Thollet, P., et al.** (2016). *Body-force modeling for aerodynamic analysis of air intake – fan interactions.* AIAA Journal.
-
-2. **Benneke, J.** (2009). *A methodology for centrifugal compressor stability prediction.* ASME Turbo Expo.
-
-3. **Xu, L.** (2003). *A computational fluid dynamics analysis of a three-dimensional transonic rotor.* NASA ROTOR 37.
-
----
-
-## 13. Acknowledgements
-
-This project is built on the following open-source platforms:
-- **OpenFOAM v13** — open-source CFD platform.
-- **PyTorch** — deep learning framework.
-- **LibTorch** — PyTorch C++ API.
-
-Thanks to the OpenFOAM Foundation and the PyTorch team for their excellent open-source tools.
-
----
-
-## 14. License
-
-MIT License
-
-Copyright (c) 2024
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
----
-
-## 15. Contact
-For questions or suggestions, please contact 705393357@qq.com.
-There probably won't be many further updates. For the NASA ROTOR 37 characteristic line the error is within 5%, but there are too many tunable hyper-parameters, so I gave up and open-sourced it. Discussions are welcome.
-
-## 16. Citation
-My advisor asked me to write it up as a paper, which is annoying. I'll probably put it on arXiv — stay tuned.
+`ArisaSTALL/` contains OpenFOAM-derived code and retains its GPL notices. Repository-wide licensing for the remaining original files still needs to be normalized; consult individual file headers and upstream licenses before redistribution.
